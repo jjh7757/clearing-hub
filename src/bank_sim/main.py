@@ -4,7 +4,8 @@
   0001 정상 입금 · 0002 계좌 없음 · 0003 지연(허브 타임아웃) · 0004 500 두 번 뒤 성공 · 0005 입금은 됐는데 응답 안 함
 그 밖의 번호는 정상 입금. 저장은 메모리(재시작하면 사라짐).
 
-본인 계좌 조회(SPEC 9.4): 김철수 / 19850315 / 010-9876-5432 의 가상 CI로 계좌 2개를 돌려준다.
+본인 계좌 조회(SPEC 9.4): 김철수 / 19850315 / 010-9876-5432 → 계좌 2개, 홍길동 / 19900101 / 010-0000-0000 → 1개
+(AvengersBank 시연 고객 demo와 같은 사람). 시험 고객의 계좌는 수취 조회·입금 응답에 그 고객 이름이 나온다.
 
 환경변수: SIM_HUB_SECRET(허브가 발급한 secret, 서명 검증), SIM_DELAY_SECONDS(지연, 기본 8),
           SIM_CI_KEY(가상 CI 키, 기본 example-ci-key-change-me)
@@ -90,14 +91,14 @@ class ReceiveRequest(BaseModel):
 async def inquiry(data: InquiryRequest):
     if _behavior(data.account_num) == "0002":
         return _error(404, "ACCOUNT_NOT_FOUND", "받는 계좌를 찾을 수 없습니다")
-    return {"holder_name": HOLDER_NAME}
+    return {"holder_name": holder_of(data.account_num)}
 
 
 @app.post("/interbank/receive", dependencies=[Depends(verify_hub)])
 async def receive(data: ReceiveRequest):
     tid = data.transfer_id
     if tid in received:  # 멱등: 같은 ID는 입금하지 않고 같은 응답
-        return {"transfer_id": tid, "status": "COMPLETED", "holder_name": HOLDER_NAME}
+        return {"transfer_id": tid, "status": "COMPLETED", "holder_name": holder_of(received[tid]["to_account"])}
     match _behavior(data.to_account):
         case "0002":
             return _error(404, "ACCOUNT_NOT_FOUND", "받는 계좌를 찾을 수 없습니다", tid)
@@ -111,7 +112,7 @@ async def receive(data: ReceiveRequest):
     received[tid] = {**data.model_dump(), "received_at": datetime.now(UTC).isoformat(timespec="seconds")}
     if _behavior(data.to_account) == "0005":  # 입금은 됐는데 응답이 늦음 → 허브는 결과 조회로만 알 수 있다
         await _delay()
-    return {"transfer_id": tid, "status": "COMPLETED", "holder_name": HOLDER_NAME}
+    return {"transfer_id": tid, "status": "COMPLETED", "holder_name": holder_of(data.to_account)}
 
 
 @app.get("/interbank/receive/{transfer_id}", dependencies=[Depends(verify_hub)])
@@ -119,7 +120,7 @@ async def receive_status(transfer_id: str):
     record = received.get(transfer_id)
     if record is None:
         return _error(404, "TRANSFER_NOT_FOUND", "그 거래 ID로 입금한 적이 없습니다", transfer_id)
-    return {"transfer_id": transfer_id, "status": "COMPLETED", "holder_name": HOLDER_NAME, "received_at": record["received_at"]}
+    return {"transfer_id": transfer_id, "status": "COMPLETED", "holder_name": holder_of(record["to_account"]), "received_at": record["received_at"]}
 
 
 class AccountsRequest(BaseModel):
@@ -131,7 +132,18 @@ SIM_CUSTOMERS = [
     {"name": HOLDER_NAME, "birth": "19850315", "phone": "010-9876-5432",
      "accounts": [{"account_num": "110-123-0001", "product_name": "자유입출금"},
                   {"account_num": "110-456-0001", "product_name": "급여통장"}]},
+    # AvengersBank 시연 고객 demo(홍길동)와 같은 사람. 운영에서 '다른 은행 내 계좌 불러오기'를 바로 시연할 수 있게
+    {"name": "홍길동", "birth": "19900101", "phone": "010-0000-0000",
+     "accounts": [{"account_num": "110-789-0001", "product_name": "자유입출금"}]},
 ]
+
+
+def holder_of(account_num: str) -> str:
+    """시험 고객의 계좌면 그 이름, 아니면 김철수 (계좌번호 끝자리 시나리오용 공통 예금주)."""
+    for customer in SIM_CUSTOMERS:
+        if any(a["account_num"] == account_num for a in customer["accounts"]):
+            return customer["name"]
+    return HOLDER_NAME
 
 
 @app.post("/interbank/accounts", dependencies=[Depends(verify_hub)])

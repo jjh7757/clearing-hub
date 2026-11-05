@@ -64,6 +64,18 @@ async def test_lookup_then_transfer_by_ref(client, banks):
     assert res.status_code == 200
 
 
+async def test_demo_customer_hong(banks):
+    """AvengersBank 시연 고객 demo(홍길동)와 같은 사람: 계좌 1개, 수취 조회·입금 응답에 홍길동."""
+    sender, _ = banks
+    hong = virtual_ci(CI_KEY, "홍길동", "19900101", "010-0000-0000")
+    data = (await sender.post("/v1/accounts/lookup", lookup_body(hong))).json()
+    assert [(a["account_masked"], a["product_name"]) for a in data["accounts"]] == [("110-***-0001", "자유입출금")]
+    res = await sender.post("/v1/inquiry", {"to_bank": "902", "to_account": "110-789-0001"})
+    assert res.json()["holder_name"] == "홍길동"
+    res = await sender.post("/v1/transfers", ref_transfer(data["accounts"][0]["account_ref"]))
+    assert res.status_code == 200 and res.json()["holder_name"] == "홍길동"
+
+
 async def test_lookup_unknown_person_is_empty(banks):
     sender, _ = banks
     res = await sender.post("/v1/accounts/lookup", lookup_body(NOBODY_CI))

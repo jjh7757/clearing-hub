@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clearing_hub.core.auth import current_bank
 from clearing_hub.core.bank_client import bank_client
 from clearing_hub.core.database import get_db
+from clearing_hub.core.exception_handlers import spec_http_status
 from clearing_hub.core.exceptions import ApiException
 from clearing_hub.domains.banks import service as bank_service
 from clearing_hub.domains.banks.models import Bank
@@ -43,7 +44,8 @@ async def inquiry(
                      receiver.bank_code, reply.status, reply.body.get("error"), extra={"bank_code": receiver.bank_code})
         raise ApiException(502, "RECEIVER_ERROR", reply.message or "받는 은행에 일시 장애가 있습니다")
     if reply.rejected:
-        raise ApiException(reply.status, reply.error, str(reply.body.get("message") or "받는 은행이 조회를 거절했습니다"))
+        # HTTP 상태는 받는 은행이 준 값이 아니라 그 코드의 SPEC 5절 상태로 (예: ACCOUNT_NOT_FOUND 404)
+        raise ApiException(spec_http_status(reply.error), reply.error, reply.message or "받는 은행이 조회를 거절했습니다")
     # 5xx·타임아웃은 받는 은행의 오류 코드를 그대로 넘기지 않고 허브 코드로 바꾼다 (SPEC 3.2)
     if reply.status is None:
         raise ApiException(504, "RECEIVER_TIMEOUT", "받는 은행이 응답하지 않습니다")

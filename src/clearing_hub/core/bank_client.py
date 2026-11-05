@@ -15,6 +15,9 @@ from clearing_hub.domains.banks.models import Bank
 
 logger = logging.getLogger(__name__)
 
+# 받는 은행이 거절할 때 쓸 수 있는 코드 (SPEC 4.1·4.2 규칙 3·4.3, 5절 표)
+RECEIVER_REJECT_CODES = {"ACCOUNT_NOT_FOUND", "ACCOUNT_INACTIVE", "AMOUNT_INVALID", "LIMIT_EXCEEDED", "VALIDATION_ERROR", "TRANSFER_NOT_FOUND"}
+
 
 @dataclass
 class BankReply:
@@ -48,6 +51,9 @@ class BankReply:
         if self.auth_failed:
             return "RECEIVER_ERROR"
         code = self.body.get("error")
+        if self.rejected:
+            # 받는 은행이 SPEC 4.2 규칙 3·5절 표에 없는 코드로 거절하면 표의 RECEIVER_ERROR로 바꾼다 (설명은 그대로 넘긴다)
+            return code if code in RECEIVER_REJECT_CODES else "RECEIVER_ERROR"
         return str(code) if isinstance(code, str) and code else ("RECEIVER_TIMEOUT" if self.status is None else "RECEIVER_ERROR")
 
     @property

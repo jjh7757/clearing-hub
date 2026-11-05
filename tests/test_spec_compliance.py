@@ -4,9 +4,13 @@ import re
 import uuid
 
 import pytest
+from sqlalchemy import update
 
 import bank_sim.main as sim
+from clearing_hub.core.bank_client import BankClient, BankReply
+from clearing_hub.core.database import SessionLocal
 from clearing_hub.domains.banks import service as bank_service
+from clearing_hub.domains.transfers.models import Transfer
 from tests.conftest import transfer_payload
 
 pytestmark = pytest.mark.anyio
@@ -59,6 +63,62 @@ async def test_times_are_utc_seconds(banks):
 
     detail = (await sender.get(f"/v1/transfers/{payload['transfer_id']}")).json()
     assert SPEC_TIME.match(detail["requested_at"]) and SPEC_TIME.match(detail["finished_at"])
+
+
+@pytest.mark.parametrize("stored_status", ["ACCEPTED", "DELIVERING", "UNKNOWN"])
+async def test_resend_answers_only_spec_statuses(banks, stored_status):
+    """3.3 응답은 200 COMPLETED / 202 PENDING / 4xx FAILED 셋뿐. 재전송 때 거래가 그 밖의 상태면 202 PENDING.
+    3.4 결과 조회는 실제 상태를 보여 준다."""
+    sender, _ = banks
+    payload = transfer_payload("110-123-0001")
+    assert (await sender.post("/v1/transfers", payload)).status_code == 200
+    async with SessionLocal() as db, db.begin():
+        await db.execute(update(Transfer).where(Transfer.transfer_id == payload["transfer_id"]).values(status=stored_status))
+
+    res = await sender.post("/v1/transfers", payload)
+    assert res.status_code == 202 and res.json()["status"] == "PENDING"
+    detail = await sender.get(f"/v1/transfers/{payload['transfer_id']}")
+    assert detail.json()["status"] == stored_status
+
+
+@pytest.mark.parametrize(
+    ("reply", "http", "code"),
+    [
+        (BankReply(409, {"error": "DUPLICATE_DEPOSIT", "message": "이미 처리 중"}), 400, "RECEIVER_ERROR"),  # 표에 없는 코드
+        (BankReply(422, {"error": "VALIDATION_ERROR", "message": "memo"}), 422, "VALIDATION_ERROR"),  # 표의 HTTP 422
+        (BankReply(400, {"error": "ACCOUNT_INACTIVE", "message": "정지"}), 400, "ACCOUNT_INACTIVE"),
+        (BankReply(400, {}), 400, "RECEIVER_ERROR"),  # 5절 형식이 아닌 본문 (BankClient가 dict가 아닌 본문을 {}로 바꾼다)
+    ],
+)
+async def test_receiver_rejection_uses_spec_table(banks, monkeypatch, reply, http, code):
+    """받는 은행의 거절은 5절 표의 코드와 그 코드의 HTTP 상태로 보내는 은행에 전달한다"""
+    sender, _ = banks
+
+    async def rejecting(self, bank, payload, request_id=None):
+        return reply
+
+    monkeypatch.setattr(BankClient, "receive", rejecting)
+    res = await sender.post("/v1/transfers", transfer_payload("110-123-0001"))
+    assert (res.status_code, res.json()["error"], res.json()["status"]) == (http, code, "FAILED")
+
+
+async def test_inquiry_rejection_uses_spec_table(banks, monkeypatch):
+    sender, _ = banks
+
+    async def rejecting(self, bank, account_num, request_id=None):
+        return BankReply(409, {"error": "SOMETHING_ELSE", "message": "x"})
+
+    monkeypatch.setattr(BankClient, "inquiry", rejecting)
+    res = await sender.post("/v1/inquiry", {"to_bank": "902", "to_account": "110-123-0001"})
+    assert (res.status_code, res.json()["error"]) == (400, "RECEIVER_ERROR")
+
+
+async def test_framework_errors_use_spec_codes(client):
+    """허용하지 않는 메서드도 표의 404 NOT_FOUND ("없는 경로"). METHOD_NOT_ALLOWED·HTTP_ERROR 같은 표 밖 코드는 없다"""
+    res = await client.delete("/v1/banks")
+    assert (res.status_code, res.json()["error"]) == (404, "NOT_FOUND")
+    res = await client.get("/v1/nothing-here")
+    assert (res.status_code, res.json()["error"]) == (404, "NOT_FOUND")
 
 
 @pytest.mark.parametrize(

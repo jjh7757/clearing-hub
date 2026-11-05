@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clearing_hub.core.auth import current_bank, require_admin
 from clearing_hub.core.database import get_db
-from clearing_hub.core.exception_handlers import error_body
+from clearing_hub.core.exception_handlers import error_body, spec_http_status
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.transfers import service
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
@@ -21,16 +21,22 @@ Sender = Annotated[Bank, Depends(current_bank)]
 
 
 def _result_response(transfer: Transfer) -> JSONResponse:
-    """상태에 따라 200 / 202 / 4xx (SPEC 3.3). 멱등 재전송에도 같은 형식으로 돌려준다."""
+    """SPEC 3.3의 세 가지 응답만 쓴다: 200 COMPLETED / 202 PENDING / 4xx FAILED. 멱등 재전송에도 같은 형식.
+
+    재전송 때 거래가 아직 ACCEPTED·DELIVERING(허브가 받는 은행을 부르는 중)이거나 UNKNOWN(재시도를 다 해도 모름)이면
+    3.3에는 없는 상태라 202 `PENDING`으로 답한다. 보내는 은행이 할 일이 같기 때문이다: 되돌리지 말고 3.4로 확인한다.
+    3.4 결과 조회는 실제 상태를 그대로 보여 준다."""
     result = TransferResult.model_validate(transfer, from_attributes=True).model_dump(mode="json")
     match transfer.status:
         case TransferStatus.COMPLETED:
             return JSONResponse(status_code=200, content=result)
         case TransferStatus.FAILED:
-            http = 404 if transfer.fail_code in ("ACCOUNT_NOT_FOUND", "TRANSFER_NOT_FOUND") else 400
-            return JSONResponse(status_code=http, content={**error_body(transfer.fail_code or "FAILED", transfer.fail_message or "", transfer.transfer_id), "status": "FAILED"})
+            code = transfer.fail_code or "INTERNAL_ERROR"
+            return JSONResponse(status_code=spec_http_status(code), content={
+                **error_body(code, transfer.fail_message or "받는 은행이 거절했습니다", transfer.transfer_id), "status": "FAILED",
+            })
         case _:
-            return JSONResponse(status_code=202, content=result)
+            return JSONResponse(status_code=202, content={**result, "status": TransferStatus.PENDING.value})
 
 
 @router.post("", responses={200: {"model": TransferResult}, 202: {"model": TransferResult}})

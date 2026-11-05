@@ -30,7 +30,11 @@ async def http_error_handler(request: Request, exc: HTTPException) -> JSONRespon
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    fields = ", ".join(".".join(str(p) for p in e["loc"] if p != "body") for e in exc.errors())
+    # 필드 오류는 필드 이름, 본문 전체 검사(model_validator) 오류는 그 설명을 보여 준다
+    fields = ", ".join(
+        ".".join(str(p) for p in e["loc"] if p != "body") or str(e.get("msg", "")).removeprefix("Value error, ")
+        for e in exc.errors()
+    )
     return JSONResponse(status_code=422, content=error_body("VALIDATION_ERROR", f"입력값을 확인해 주세요: {fields}"))
 
 

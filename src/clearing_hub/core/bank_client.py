@@ -79,5 +79,8 @@ class BankClient:
     async def receive_status(self, bank: Bank, transfer_id: str) -> BankReply:
         return await self._request(bank, "GET", f"/receive/{transfer_id}")
 
+    async def accounts(self, bank: Bank, ci: str) -> BankReply:
+        return await self._request(bank, "POST", "/accounts", {"ci": ci})
+
 
 bank_client = BankClient()

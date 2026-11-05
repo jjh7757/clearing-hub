@@ -5,6 +5,8 @@ from fastapi import FastAPI
 
 from clearing_hub.core.database import engine
 from clearing_hub.core.exception_handlers import register_exception_handlers
+from clearing_hub.domains.accounts.router import admin_router as account_admin_router
+from clearing_hub.domains.accounts.router import router as account_router
 from clearing_hub.domains.banks.router import admin_router as bank_admin_router
 from clearing_hub.domains.banks.router import router as bank_router
 from clearing_hub.domains.inquiry.router import router as inquiry_router
@@ -30,8 +32,10 @@ register_exception_handlers(app)
 app.include_router(bank_router)
 app.include_router(inquiry_router)
 app.include_router(transfer_router)
+app.include_router(account_router)
 app.include_router(bank_admin_router)
 app.include_router(transfer_admin_router)
+app.include_router(account_admin_router)
 
 
 @app.get("/")

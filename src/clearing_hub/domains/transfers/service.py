@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clearing_hub.core.bank_client import BankClient, BankReply, bank_client
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.exceptions import BadRequest, Forbidden, NotFound
+from clearing_hub.domains.accounts import service as account_service
 from clearing_hub.domains.banks import service as bank_service
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
@@ -72,9 +73,13 @@ async def accept_and_deliver(
     if data.to_bank == sender.bank_code:
         raise BadRequest("SAME_BANK", "같은 은행 안의 이체는 중계하지 않습니다", data.transfer_id)
     receiver = await bank_service.require_active_bank(db, data.to_bank, data.transfer_id)
+    to_account = data.to_account
+    if data.to_account_ref is not None:  # 본인 계좌 조회로 받은 참조값 → 실제 계좌번호 (SPEC 9.3)
+        to_account = await account_service.resolve_ref(db, sender, data.to_account_ref, data.to_bank, data.transfer_id)
 
     # 1) 접수 저장을 먼저 커밋한다. 이후 은행 호출 중에 허브가 죽어도 거래 기록은 남는다
-    transfer = Transfer(**data.model_dump(), from_bank=sender.bank_code, status=TransferStatus.ACCEPTED)
+    transfer = Transfer(**data.model_dump(exclude={"to_account", "to_account_ref"}), to_account=to_account,
+                        from_bank=sender.bank_code, status=TransferStatus.ACCEPTED)
     db.add(transfer)
     db.add(TransferEvent(transfer_id=transfer.transfer_id, from_status=None, to_status=TransferStatus.ACCEPTED, detail="접수"))
     _set_status(db, transfer, TransferStatus.DELIVERING, f"{receiver.name}에 전달")

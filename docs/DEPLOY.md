@@ -119,6 +119,7 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/902/ping
 | | `RECEIVER_TIMEOUT_SECONDS`, `RETRY_INTERVAL_SECONDS`, `RETRY_MAX_COUNT`, `MAX_TRANSFER_AMOUNT` | `.env.example`과 같은 기본값 |
 | `sim.env` | `SIM_HUB_SECRET` | 902 등록 때 받은 secret |
 | | `SIM_DELAY_SECONDS` | `8` (허브 타임아웃 5초보다 길어야 지연 시나리오가 재현된다) |
+| | `SIM_CI_KEY` | 참가 은행들에 나눠 준 `CI_KEY` (SPEC 9.1). 비어 있으면 예시 키 `example-ci-key-change-me`를 써서, 실제 키로 만든 `ci`로는 가짜 은행 계좌가 나오지 않는다. 넣은 뒤 `deploy-app`으로 컨테이너를 다시 만든다 |
 
 가짜 은행에는 허브의 DB 주소와 관리 토큰을 주지 않으려고 env 파일을 나눴다.
 

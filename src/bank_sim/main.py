@@ -4,7 +4,10 @@
   0001 정상 입금 · 0002 계좌 없음 · 0003 지연(허브 타임아웃) · 0004 500 두 번 뒤 성공 · 0005 입금은 됐는데 응답 안 함
 그 밖의 번호는 정상 입금. 저장은 메모리(재시작하면 사라짐).
 
-환경변수: SIM_HUB_SECRET(허브가 발급한 secret, 서명 검증), SIM_DELAY_SECONDS(지연, 기본 8)
+본인 계좌 조회(SPEC 9.4): 김철수 / 19850315 / 010-9876-5432 의 가상 CI로 계좌 2개를 돌려준다.
+
+환경변수: SIM_HUB_SECRET(허브가 발급한 secret, 서명 검증), SIM_DELAY_SECONDS(지연, 기본 8),
+          SIM_CI_KEY(가상 CI 키, 기본 example-ci-key-change-me)
 실행: uv run uvicorn bank_sim.main:app --port 8100
 """
 
@@ -17,6 +20,7 @@ from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from clearing_hub.core.ci import virtual_ci
 from clearing_hub.core.signing import verify
 
 HOLDER_NAME = "김철수"
@@ -116,6 +120,27 @@ async def receive_status(transfer_id: str):
     if record is None:
         return _error(404, "TRANSFER_NOT_FOUND", "그 거래 ID로 입금한 적이 없습니다", transfer_id)
     return {"transfer_id": transfer_id, "status": "COMPLETED", "holder_name": HOLDER_NAME, "received_at": record["received_at"]}
+
+
+class AccountsRequest(BaseModel):
+    ci: str
+
+
+# SPEC 9.4 본인 계좌 조회용 고객. ci는 SIM_CI_KEY로 그때그때 계산한다 (허브가 나눠 준 CI_KEY와 같아야 한다)
+SIM_CUSTOMERS = [
+    {"name": HOLDER_NAME, "birth": "19850315", "phone": "010-9876-5432",
+     "accounts": [{"account_num": "110-123-0001", "product_name": "자유입출금"},
+                  {"account_num": "110-456-0001", "product_name": "급여통장"}]},
+]
+
+
+@app.post("/interbank/accounts", dependencies=[Depends(verify_hub)])
+async def accounts(data: AccountsRequest):
+    ci_key = os.environ.get("SIM_CI_KEY", "example-ci-key-change-me")
+    for customer in SIM_CUSTOMERS:
+        if virtual_ci(ci_key, customer["name"], customer["birth"], customer["phone"]) == data.ci:
+            return {"accounts": customer["accounts"]}
+    return {"accounts": []}  # 고객이 없어도 빈 목록 (고객 존재 여부를 드러내지 않는다)
 
 
 @app.get("/")

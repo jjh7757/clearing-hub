@@ -20,10 +20,11 @@ src/clearing_hub/
 │   └── config.py, database.py, exceptions.py, exception_handlers.py
 ├── domains/
 │   ├── banks/              참가 은행 등록·키 발급 (/admin/banks), 목록 (/v1/banks)
+│   ├── accounts/           본인 명의 계좌 조회 (/v1/accounts/lookup), account_ref, 조회 기록 (/admin/account-lookups)
 │   ├── inquiry/            수취 조회 중계 (/v1/inquiry)
 │   └── transfers/          이체 접수·전달·상태 머신·결과 조회 (/v1/transfers), 관리 조회 (/admin/transfers)
 └── workers/retry.py        미확인(PENDING) 거래 확인 태스크
-src/bank_sim/main.py        가짜 은행 (SPEC 4절 참고 구현, 계좌번호 끝자리로 성공·실패·지연 재현)
+src/bank_sim/main.py        가짜 은행 (SPEC 4·9.4절 참고 구현, 계좌번호 끝자리로 성공·실패·지연 재현)
 tests/                      서명, 인증, 이체 성공·실패·멱등·타임아웃·재시도
 ```
 
@@ -68,6 +69,8 @@ API 문서: http://127.0.0.1:8000/docs
 3. 보내는 은행(예: AvengersBank, `901`)도 같은 방법으로 등록하고, 그 키로 서명해서 `/v1/transfers`를 부른다. 서명 방법과 예시는 [SPEC.md](docs/SPEC.md) 2절.
 
 가짜 은행의 계좌번호 끝 4자리: `0001` 정상 · `0002` 계좌 없음 · `0003` 지연(타임아웃) · `0004` 500 두 번 뒤 성공 · `0005` 입금됐는데 응답 없음.
+
+본인 계좌 조회(SPEC 9절): 가짜 은행은 `김철수 / 19850315 / 01098765432`의 가상 CI(`SIM_CI_KEY`, 기본 `example-ci-key-change-me`)에 계좌 2개를 돌려준다.
 
 ## 테스트
 

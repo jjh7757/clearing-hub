@@ -117,11 +117,23 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/902/ping
 | `.env` | `DATABASE_URL` | `postgresql+psycopg://clearing_hub:<생성>@postgres:5432/clearing_hub` |
 | | `ADMIN_TOKEN` | 생성 (hex 64자). 관리 API(`/admin/*`) 헤더 `X-Admin-Token` |
 | | `RECEIVER_TIMEOUT_SECONDS`, `RETRY_INTERVAL_SECONDS`, `RETRY_MAX_COUNT`, `MAX_TRANSFER_AMOUNT` | `.env.example`과 같은 기본값 |
+| | `CI_KEY` | 가상 CI 키 (SPEC 9.1, hex 64자). **허브 앱은 쓰지 않는다**. 원본 보관용이며 참가 은행들에 나눠 주는 값 |
 | `sim.env` | `SIM_HUB_SECRET` | 902 등록 때 받은 secret |
 | | `SIM_DELAY_SECONDS` | `8` (허브 타임아웃 5초보다 길어야 지연 시나리오가 재현된다) |
-| | `SIM_CI_KEY` | 참가 은행들에 나눠 준 `CI_KEY` (SPEC 9.1). 비어 있으면 예시 키 `example-ci-key-change-me`를 써서, 실제 키로 만든 `ci`로는 가짜 은행 계좌가 나오지 않는다. 넣은 뒤 `deploy-app`으로 컨테이너를 다시 만든다 |
+| | `SIM_CI_KEY` | `.env`의 `CI_KEY`와 같은 값. 비어 있으면 예시 키 `example-ci-key-change-me`를 써서, 실제 키로 만든 `ci`로는 가짜 은행 계좌가 나오지 않는다 |
 
 가짜 은행에는 허브의 DB 주소와 관리 토큰을 주지 않으려고 env 파일을 나눴다.
+
+## CI_KEY (가상 CI 키)
+
+2026-11-05 서버 안에서 `openssl rand -hex 32`로 만들었다. 값은 서버 밖(채팅·문서·Git)에 적지 않았다. 넣기 전 파일은 `.env.bak-20261105053610`, `sim.env.bak-20261105053610`으로 남겼다.
+
+- 확인: 실제 키로 만든 김철수 `ci` → 902 계좌 2개, 예시 키로 만든 `ci` → 0개
+- 참가 은행에 전달할 때 (Session Manager): `sudo grep '^CI_KEY=' /srv/clearing-hub/.env | cut -d= -f2`. secret처럼 그 은행 팀에만 개별로 준다. 은행은 자기 서버 `.env`에 넣고, 고객 `ci`를 이 키로 계산해 저장한다
+- **바꾸지 않는다**: 바꾸면 모든 은행이 저장해 둔 고객 `ci`를 다시 계산해야 한다. 유출됐을 때만 새로 만들고, `.env`·`sim.env`를 함께 고친 뒤 아래 명령으로 컨테이너를 다시 만들고 전 은행에 알린다
+  ```bash
+  sudo /usr/local/bin/deploy-app clearing-hub "$(docker inspect -f '{{.Config.Image}}' clearing-hub | cut -d: -f2)"
+  ```
 
 ## 알아 둘 것
 

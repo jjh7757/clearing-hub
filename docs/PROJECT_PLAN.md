@@ -305,7 +305,7 @@ AvengersBank처럼 router → service → repository 계층과 `domains/*` 5개 
 
 **이 프로젝트 안에서 정할 것**
 - 프로젝트 이름 (예: ClearingHub, 아벤저스 금융망). 실제 기관 이름은 쓰지 않는다
-- 배포 위치 (AvengersBank와 같은 환경인지), 도메인
+- ~~배포 위치, 도메인~~ → AvengersBank와 같은 공용 서버, `clearing-hub.ai-agent-develop.cloud` ([DEPLOY.md](DEPLOY.md))
 - 저장소: 별도 저장소로 만든다 (중계 기관은 특정 은행 안에 있으면 안 된다). AvengersBank에는 허브 클라이언트와 `/interbank/*`만 추가
 - 시작일·인원 → 4절의 날짜와 역할 분담
 - 관리자 계정 발급 방법 (시드 스크립트)

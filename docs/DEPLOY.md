@@ -1,0 +1,128 @@
+# 배포 (AWS)
+
+AvengersBank와 같은 공용 배포 서버에 올린다. 환경 구성·설계 이유는 TIL 저장소의 `AWS배포환경/`(README, 새앱배포절차, DB환경구성)을 따른다.
+
+- 주소: https://clearing-hub.ai-agent-develop.cloud (API 문서 `/docs`)
+- 흐름: `main`에 push → GitHub Actions(arm64)가 **테스트** → 이미지 빌드 → ECR → SSM으로 서버의 `deploy-app clearing-hub <커밋>` 실행
+- 서버: EC2 `t4g.small`(2GB, 공용), `/srv/clearing-hub`, 공용 PostgreSQL(`clearing_hub` db·role), Caddy가 HTTPS
+- 컨테이너 두 개, 이미지 하나:
+
+| 컨테이너 | 명령 | 포트 | 메모리 상한 | 공개 |
+|---|---|---|---|---|
+| `clearing-hub` | `alembic upgrade head` → `uvicorn clearing_hub.main:app` | 8000 | 256MB | Caddy로 HTTPS |
+| `clearing-hub-sim` | `uvicorn bank_sim.main:app` (가짜 은행) | 8100 | 128MB | 안 함. `web` 네트워크 안에서 허브만 부른다 |
+
+- 로컬 측정 (서버와 같은 compose, 이체 몇 건 뒤): 허브 75MB, 가짜 은행 37MB
+- 허브 워커는 1개만 띄운다. 재시도 태스크가 프로세스 안에서 돌기 때문에 여러 개면 같은 거래를 겹쳐 확인한다
+- 가짜 은행은 메모리에만 저장한다. 재배포하면 입금 기록이 사라진다 (허브 DB의 거래 기록은 남는다)
+
+| 파일 | 역할 |
+|---|---|
+| `Dockerfile` | uv(Python 3.13)에 의존성(`--no-dev`). 기본 명령은 허브, compose에서 가짜 은행 명령으로 바꾼다 |
+| `.github/workflows/deploy.yml` | TIL `templates/deploy.yml` 기반. 브랜치 `main`, 빌드 전에 `pytest` |
+| `deploy/server-setup.sh` | 서버 최초 1회: compose, DB role·database, `.env`·`sim.env`(비밀값을 서버 안에서 생성) |
+| `alembic/versions/ef6bf3b35409_init.py` | 초기 테이블 (`banks`, `transfers`, `transfer_events`) |
+
+## 처음 한 번
+
+순서대로 한다. 1·2를 끝내기 전에 `main`에 push하면 워크플로가 AWS 단계에서 실패한다 (테스트까지만 돈다). 그때는 다 끝낸 뒤 Actions에서 `Run workflow`로 다시 돌린다.
+
+- [ ] 1. ECR 리포지토리 `clearing-hub` (프라이빗, **Mutable**), 수명 주기 규칙: 이미지 10개 초과 시 만료
+- [ ] 2. IAM 역할 `github-actions-deploy` 신뢰 정책 `sub` 목록에 추가:
+  ```
+  "repo:jjh7757@307797437/clearing-hub@1446511280:*"
+  ```
+  (저장소는 퍼블릭이라 arm64 러너가 무료다. 비공개로 바꾸면 안 된다)
+- [ ] 3. 서버에서 `deploy/server-setup.sh` 실행 (SSM 또는 Session Manager, root) → `/srv/clearing-hub/{docker-compose.yml,.env,sim.env}`, PostgreSQL `clearing_hub`
+- [ ] 4. 가비아 DNS: A `clearing-hub` → `13.209.128.48`, **전파 확인 후** 다음 단계
+  ```bash
+  nslookup clearing-hub.ai-agent-develop.cloud 8.8.8.8
+  ```
+- [ ] 5. `/srv/caddy/Caddyfile`에 블록 추가 후 reload. reload 뒤 실제 적용을 로그나 `localhost:2019/config/`로 확인한다 (AvengersBank 때 첫 reload가 적용되지 않았다)
+  ```
+  clearing-hub.ai-agent-develop.cloud {
+      reverse_proxy clearing-hub:8000
+  }
+  ```
+- [ ] 6. `main`에 push → Actions 초록불 → 아래 "확인"
+- [ ] 7. 가짜 은행 등록과 secret 연결 (아래 "가짜 은행 연결")
+- [ ] 8. `/srv/monitor.sh`에 추가 (CRLF가 섞이지 않게):
+  ```
+  check_url "clearing-hub" "https://clearing-hub.ai-agent-develop.cloud"
+  check_container_health "clearing-hub"
+  check_container_health "clearing-hub-sim"
+  ```
+
+## 확인
+
+```bash
+curl -s https://clearing-hub.ai-agent-develop.cloud/
+```
+```bash
+docker compose -f /srv/clearing-hub/docker-compose.yml ps
+```
+
+`{"service":"ClearingHub",...}`가 오고, 두 컨테이너가 `healthy`이며 이미지 태그가 방금 push한 커밋과 같아야 한다. 태그가 다르면 워크플로가 초록불이어도 배포는 실패한 것이다.
+
+> compose 명령을 서버에서 직접 칠 때는 `ECR_REGISTRY`·`APP_NAME`·`IMAGE_TAG`가 비어 이미지 이름을 못 만든다. `ps`·`logs`는 괜찮지만, 컨테이너를 다시 만들 때(`up -d`)는 아래처럼 `deploy-app`을 쓴다.
+
+## 가짜 은행 연결
+
+가짜 은행은 허브가 발급한 secret으로 허브 서명을 검증한다. secret은 등록할 때 한 번만 나오므로 등록 → `sim.env`에 넣기 → 컨테이너 다시 만들기 순서로 한다. Session Manager에서:
+
+```bash
+TOKEN=$(sudo grep '^ADMIN_TOKEN=' /srv/clearing-hub/.env | cut -d= -f2)
+curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks \
+  -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"bank_code":"902","name":"SimBank","base_url":"http://clearing-hub-sim:8100/interbank"}'
+```
+
+응답의 `secret`을 `/srv/clearing-hub/sim.env`의 `SIM_HUB_SECRET=` 뒤에 넣고, 지금 태그 그대로 컨테이너를 다시 만든다 (`restart`로는 env가 바뀌지 않는다):
+
+```bash
+sudo /usr/local/bin/deploy-app clearing-hub "$(docker inspect -f '{{.Config.Image}}' clearing-hub | cut -d: -f2)"
+```
+
+연결 확인:
+
+```bash
+curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/902/ping -H "X-Admin-Token: $TOKEN"
+```
+
+`"reachable":true, "status":200`이면 된다. `SIM_HUB_SECRET`이 비어 있으면 가짜 은행은 서명 검증을 건너뛴다. 외부에 공개하지 않아 위험은 작지만, 서명까지 시연하려면 채운다.
+
+## 참가 은행 등록
+
+| 은행 | `base_url` |
+|---|---|
+| 가짜 은행 (902) | `http://clearing-hub-sim:8100/interbank` (서버 내부) |
+| AvengersBank (901) | `https://avengers-bank.ai-agent-develop.cloud/api/interbank`. AvengersBank가 `/interbank/*`를 `/api` 아래에 만든 뒤 등록한다. 같은 서버이므로 `http://avengers-bank:8000/api/interbank`로 내부 호출을 해도 된다 |
+| 다른 팀 | 각 팀이 알려 준 공개 HTTPS 주소 |
+
+등록 응답의 `api_key`·`secret`은 그 은행 팀에게만 전달한다. AvengersBank는 서버 `.env`에 허브 주소와 함께 넣는다.
+
+## 서버 `.env`
+
+| 파일 | 키 | 값 |
+|---|---|---|
+| `.env` | `DATABASE_URL` | `postgresql+psycopg://clearing_hub:<생성>@postgres:5432/clearing_hub` |
+| | `ADMIN_TOKEN` | 생성 (hex 64자). 관리 API(`/admin/*`) 헤더 `X-Admin-Token` |
+| | `RECEIVER_TIMEOUT_SECONDS`, `RETRY_INTERVAL_SECONDS`, `RETRY_MAX_COUNT`, `MAX_TRANSFER_AMOUNT` | `.env.example`과 같은 기본값 |
+| `sim.env` | `SIM_HUB_SECRET` | 902 등록 때 받은 secret |
+| | `SIM_DELAY_SECONDS` | `8` (허브 타임아웃 5초보다 길어야 지연 시나리오가 재현된다) |
+
+가짜 은행에는 허브의 DB 주소와 관리 토큰을 주지 않으려고 env 파일을 나눴다.
+
+## 알아 둘 것
+
+- `/admin/*`이 인터넷에 열려 있고 `ADMIN_TOKEN` 하나로만 막는다. 관리자 JWT 로그인은 다음 단계이므로 토큰을 채팅·문서에 붙이지 않는다
+- `hmac_secret`은 아직 평문으로 저장된다 (다음 단계: Fernet 암호화). DB 백업에도 그대로 들어간다
+- 마이그레이션은 컨테이너가 시작될 때마다 `alembic upgrade head`로 적용된다. 모델을 바꾸면 리비전을 만들어 함께 커밋한다
+
+## 로컬 검증 (2026-11-05)
+
+서버와 같은 compose(`server-setup.sh`에서 꺼낸 것)에 `web` 네트워크, `postgres:16-alpine`을 붙여 돌렸다.
+
+- 마이그레이션 `ef6bf3b35409` 적용, 두 컨테이너 `healthy`
+- 902·901 등록 → `sim.env`에 secret → 다시 만든 뒤 `ping` 200, 서명 없는 호출은 가짜 은행이 401로 거절
+- 이체: `0001` COMPLETED · `0002` FAILED(404) · `0004` PENDING → 재시도 1회 뒤 COMPLETED · `0005` PENDING → 재시도로 COMPLETED

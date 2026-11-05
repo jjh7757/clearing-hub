@@ -1,0 +1,88 @@
+import json
+import os
+
+# 앱을 import하기 전에 테스트용 설정 (SQLite, 짧은 타임아웃)
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test.db"
+os.environ["ADMIN_TOKEN"] = "test-admin-token-test-admin-token-0000"
+os.environ["RECEIVER_TIMEOUT_SECONDS"] = "0.3"
+os.environ["RETRY_INTERVAL_SECONDS"] = "3600"  # 테스트는 confirm_pending을 직접 부른다
+os.environ["RETRY_MAX_COUNT"] = "3"
+os.environ["SIM_DELAY_SECONDS"] = "1"  # 허브 타임아웃(0.3초)보다 길게
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+import bank_sim.main as sim
+from clearing_hub.core import bank_client as bank_client_module
+from clearing_hub.core.bank_client import BankClient
+from clearing_hub.core.database import Base, engine
+from clearing_hub.core.signing import sign
+from clearing_hub.main import app
+
+ADMIN = {"X-Admin-Token": os.environ["ADMIN_TOKEN"]}
+SIM_URL = "http://sim/interbank"
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+class SignedBank:
+    """테스트에서 참가 은행 역할: 발급받은 키로 서명해 허브를 부른다."""
+
+    def __init__(self, client: AsyncClient, bank_code: str, api_key: str, secret: str):
+        self.client, self.bank_code, self.api_key, self.secret = client, bank_code, api_key, secret
+
+    def headers(self, body: bytes, timestamp: int | None = None) -> dict[str, str]:
+        return {"X-Bank-Code": self.bank_code, "X-Api-Key": self.api_key, "Content-Type": "application/json",
+                **sign(self.secret, body, timestamp)}
+
+    async def post(self, path: str, payload: dict, **kw):
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+        return await self.client.post(path, content=body, headers=self.headers(body, **kw))
+
+    async def get(self, path: str):
+        return await self.client.get(path, headers=self.headers(b""))
+
+
+@pytest.fixture
+async def client(monkeypatch):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    sim.received.clear()
+    sim.server_errors_left.clear()
+    # 허브 → 은행 호출을 가짜 은행 앱(bank_sim)으로 보낸다
+    sim_client = AsyncClient(transport=ASGITransport(app=sim.app), base_url="http://sim")
+    monkeypatch.setattr(bank_client_module.bank_client, "_client", sim_client)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://hub") as ac:
+            yield ac
+    await sim_client.aclose()
+
+
+async def register_bank(client: AsyncClient, bank_code: str, name: str, base_url: str = SIM_URL) -> SignedBank:
+    res = await client.post("/admin/banks", json={"bank_code": bank_code, "name": name, "base_url": base_url}, headers=ADMIN)
+    assert res.status_code == 201, res.text
+    data = res.json()
+    return SignedBank(client, bank_code, data["api_key"], data["secret"])
+
+
+@pytest.fixture
+async def banks(client, monkeypatch):
+    """901 = 보내는 은행, 902 = 받는 은행(bank_sim). bank_sim은 902의 secret으로 허브 서명을 검증한다."""
+    sender = await register_bank(client, "901", "AvengersBank")
+    receiver = await register_bank(client, "902", "SimBank")
+    monkeypatch.setenv("SIM_HUB_SECRET", receiver.secret)
+    return sender, receiver
+
+
+def transfer_payload(to_account: str, transfer_id: str | None = None, amount: int = 50000) -> dict:
+    import uuid
+
+    return {"transfer_id": transfer_id or str(uuid.uuid4()), "to_bank": "902", "to_account": to_account,
+            "from_account": "110-200-456789", "amount": amount, "sender_name": "홍길동", "memo": "생활비"}
+
+
+__all__ = ["BankClient"]

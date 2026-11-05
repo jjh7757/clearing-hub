@@ -1,0 +1,40 @@
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from clearing_hub.core.auth import current_bank
+from clearing_hub.core.bank_client import bank_client
+from clearing_hub.core.database import get_db
+from clearing_hub.core.exceptions import ApiException
+from clearing_hub.domains.banks import service as bank_service
+from clearing_hub.domains.banks.models import Bank
+from clearing_hub.domains.banks.schemas import BANK_CODE
+
+router = APIRouter(prefix="/v1/inquiry", tags=["inquiry"])
+
+
+class InquiryRequest(BaseModel):
+    to_bank: str = BANK_CODE
+    to_account: str = Field(min_length=1, max_length=50)
+
+
+class InquiryResponse(InquiryRequest):
+    holder_name: str
+
+
+@router.post("", response_model=InquiryResponse)
+async def inquiry(
+    data: InquiryRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[Bank, Depends(current_bank)],
+):
+    """수취 조회 중계 (SPEC 3.2). 받는 은행의 /inquiry를 불러 예금주 이름을 돌려준다. 돈은 움직이지 않는다."""
+    receiver = await bank_service.require_active_bank(db, data.to_bank)
+    reply = await bank_client.inquiry(receiver, data.to_account)
+    if reply.ok and reply.body.get("holder_name"):
+        return InquiryResponse(**data.model_dump(), holder_name=str(reply.body["holder_name"]))
+    if reply.rejected:
+        raise ApiException(reply.status, reply.error, str(reply.body.get("message") or "받는 은행이 조회를 거절했습니다"))
+    raise ApiException(502 if reply.status else 504, reply.error, "받는 은행이 응답하지 않습니다")

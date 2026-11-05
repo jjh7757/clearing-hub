@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from clearing_hub.core.ci import virtual_ci
+from clearing_hub.core.log_setup import configure_logging
 from clearing_hub.core.signing import verify
 
 HOLDER_NAME = "김철수"
@@ -31,6 +32,7 @@ received: dict[str, dict] = {}  # transfer_id → 입금 기록 (멱등성)
 server_errors_left: dict[str, int] = {}  # 0004: transfer_id → 남은 500 횟수
 seen_request_ids: list[tuple[str, str | None]] = []  # (경로, 받은 X-Request-ID). 최근 것만 둔다
 logger = logging.getLogger("bank_sim")
+configure_logging()  # 허브와 같은 JSON 로그
 
 
 def _error(status: int, code: str, message: str, transfer_id: str | None = None) -> JSONResponse:
@@ -61,7 +63,8 @@ async def verify_hub(
     # SPEC 2.4: 추적 ID는 서명 대상이 아니다. 받은 그대로 로그에 남긴다 (없어도·형식이 틀려도 거절하지 않는다)
     seen_request_ids.append((request.url.path, x_request_id))
     del seen_request_ids[:-100]  # 오래 켜 둬도 메모리가 쌓이지 않게
-    logger.info("허브 요청 %s %s [request_id=%s]", request.method, request.url.path, x_request_id or "-")
+    logger.info("허브 요청 %s %s", request.method, request.url.path,
+                extra={"request_id": x_request_id, "method": request.method, "path": request.url.path})
     secret = os.environ.get("SIM_HUB_SECRET")
     if not secret:
         return

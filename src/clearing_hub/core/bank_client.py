@@ -69,8 +69,8 @@ class BankClient:
                 self.client.request(method, url, content=body, headers=headers, timeout=timeout), timeout
             )
         except (TimeoutError, httpx.HTTPError) as exc:
-            logger.warning("은행 %s 응답 없음: %s %s (%s) [request_id=%s]", bank.bank_code, method, path,
-                           type(exc).__name__, request_id or "-")
+            logger.warning("은행 %s 응답 없음: %s %s (%s)", bank.bank_code, method, path, type(exc).__name__,
+                           extra={"request_id": request_id, "bank_code": bank.bank_code})
             return BankReply(None, {})
         try:
             data = response.json() if response.content else {}

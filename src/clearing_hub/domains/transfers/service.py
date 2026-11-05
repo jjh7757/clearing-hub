@@ -131,6 +131,8 @@ async def confirm_pending(db: AsyncSession, client: BankClient = bank_client) ->
             _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
         else:
             _set_status(db, transfer, TransferStatus.PENDING, f"확인 실패 (HTTP {status.status})")
+        logger.info("거래 재확인 %s → %s", transfer.transfer_id, transfer.status,
+                    extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id, "bank_code": transfer.to_bank})
         if transfer.status == TransferStatus.COMPLETED and not transfer.holder_name:
             await _fill_holder_name(transfer, receiver, client)
         if transfer.status in FINAL:
@@ -139,6 +141,7 @@ async def confirm_pending(db: AsyncSession, client: BankClient = bank_client) ->
             transfer.retry_count += 1
             if transfer.retry_count >= settings.retry_max_count:
                 _set_status(db, transfer, TransferStatus.UNKNOWN, f"{transfer.retry_count}회 확인 실패, 관리자 확인 필요")
-                logger.error("거래 %s 결과를 알 수 없음 (%s → %s)", transfer.transfer_id, transfer.from_bank, transfer.to_bank)
+                logger.error("거래 %s 결과를 알 수 없음 (%s → %s)", transfer.transfer_id, transfer.from_bank, transfer.to_bank,
+                             extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id})
     await db.commit()
     return confirmed

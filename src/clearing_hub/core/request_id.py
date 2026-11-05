@@ -6,12 +6,15 @@
 - 서명 대상이 아니다. 로그 추적용이라 바뀌어도 돈의 흐름에는 영향이 없다.
 """
 
+import logging
 import re
+import time
 import uuid
 from contextvars import ContextVar
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+access_logger = logging.getLogger("clearing_hub.access")
 REQUEST_ID_HEADER = "X-Request-ID"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -42,9 +45,13 @@ class RequestIdMiddleware:
         )
         request_id = valid_request_id(incoming) or uuid.uuid4().hex
         token = _request_id.set(request_id)
+        started = time.perf_counter()
+        status = 500  # 응답을 못 보내고 예외가 나면 500으로 남긴다
 
         async def send_with_id(message: Message) -> None:
+            nonlocal status
             if message["type"] == "http.response.start":
+                status = message["status"]
                 headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"x-request-id"]
                 headers.append((b"x-request-id", request_id.encode("latin-1")))
                 message = {**message, "headers": headers}
@@ -53,4 +60,17 @@ class RequestIdMiddleware:
         try:
             await self.app(scope, receive, send_with_id)
         finally:
+            # 접근 로그: 요청마다 한 줄 (요청한 은행 코드도 남겨 어느 은행 요청인지 바로 보이게)
+            duration_ms = round((time.perf_counter() - started) * 1000, 1)
+            method, path = scope.get("method", ""), scope.get("path", "")
+            bank_code = next(
+                (value.decode("latin-1") for name, value in scope.get("headers", []) if name == b"x-bank-code"), None
+            )
+            client = scope.get("client")
+            access_logger.log(
+                logging.WARNING if status >= 500 else logging.INFO,
+                "%s %s %s %.1fms", method, path, status, duration_ms,
+                extra={"request_id": request_id, "method": method, "path": path, "status": status, "duration_ms": duration_ms,
+                       "bank_code": bank_code, "client": client[0] if client else None},
+            )
             _request_id.reset(token)

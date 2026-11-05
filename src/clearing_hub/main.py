@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from clearing_hub.core.database import engine
 from clearing_hub.core.exception_handlers import register_exception_handlers
+from clearing_hub.core.log_setup import configure_logging
 from clearing_hub.core.request_id import RequestIdMiddleware
 from clearing_hub.domains.accounts.router import admin_router as account_admin_router
 from clearing_hub.domains.accounts.router import router as account_router
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI):
         await engine.dispose()
 
 
+configure_logging()  # JSON 로그, 모든 줄에 request_id (SPEC 2.4)
 app = FastAPI(title="ClearingHub", lifespan=lifespan)
 app.add_middleware(RequestIdMiddleware)  # X-Request-ID 받기·만들기·응답에 붙이기 (SPEC 2.4)
 register_exception_handlers(app)

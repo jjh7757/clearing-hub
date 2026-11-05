@@ -44,4 +44,4 @@ app.include_router(account_admin_router)
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v0.4"}  # docs/SPEC.md 버전과 맞춘다
+    return {"service": "ClearingHub", "spec": "v0.4.3"}  # docs/SPEC.md 버전과 맞춘다

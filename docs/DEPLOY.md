@@ -27,31 +27,40 @@ AvengersBank와 같은 공용 배포 서버에 올린다. 환경 구성·설계 
 
 순서대로 한다. 1·2를 끝내기 전에 `main`에 push하면 워크플로가 AWS 단계에서 실패한다 (테스트까지만 돈다). 그때는 다 끝낸 뒤 Actions에서 `Run workflow`로 다시 돌린다.
 
-- [ ] 1. ECR 리포지토리 `clearing-hub` (프라이빗, **Mutable**), 수명 주기 규칙: 이미지 10개 초과 시 만료
-- [ ] 2. IAM 역할 `github-actions-deploy` 신뢰 정책 `sub` 목록에 추가:
+- [x] 1. ECR 리포지토리 `clearing-hub` (프라이빗, **Mutable**), 수명 주기 규칙: 이미지 10개 초과 시 만료
+- [x] 2. IAM 역할 `github-actions-deploy` 신뢰 정책 `sub` 목록에 추가:
   ```
   "repo:jjh7757@307797437/clearing-hub@1446511280:*"
   ```
   (저장소는 퍼블릭이라 arm64 러너가 무료다. 비공개로 바꾸면 안 된다)
-- [ ] 3. 서버에서 `deploy/server-setup.sh` 실행 (SSM 또는 Session Manager, root) → `/srv/clearing-hub/{docker-compose.yml,.env,sim.env}`, PostgreSQL `clearing_hub`
-- [ ] 4. 가비아 DNS: A `clearing-hub` → `13.209.128.48`, **전파 확인 후** 다음 단계
+- [x] 3. 서버에서 `deploy/server-setup.sh` 실행 (SSM 또는 Session Manager, root) → `/srv/clearing-hub/{docker-compose.yml,.env,sim.env}`, PostgreSQL `clearing_hub`
+- [x] 4. 가비아 DNS: A `clearing-hub` → `13.209.128.48`, **전파 확인 후** 다음 단계
   ```bash
   nslookup clearing-hub.ai-agent-develop.cloud 8.8.8.8
   ```
-- [ ] 5. `/srv/caddy/Caddyfile`에 블록 추가 후 reload. reload 뒤 실제 적용을 로그나 `localhost:2019/config/`로 확인한다 (AvengersBank 때 첫 reload가 적용되지 않았다)
+- [x] 5. `/srv/caddy/Caddyfile`에 블록 추가 후 reload. reload 뒤 실제 적용을 Caddy 로그(`docker logs caddy`의 `certificate obtained successfully`)로 확인한다 (AvengersBank 때 첫 reload가 적용되지 않았다. 컨테이너 안에서 `localhost:2019` 관리 API는 연결이 거부됐다)
   ```
   clearing-hub.ai-agent-develop.cloud {
       reverse_proxy clearing-hub:8000
   }
   ```
-- [ ] 6. `main`에 push → Actions 초록불 → 아래 "확인"
-- [ ] 7. 가짜 은행 등록과 secret 연결 (아래 "가짜 은행 연결")
-- [ ] 8. `/srv/monitor.sh`에 추가 (CRLF가 섞이지 않게):
+- [x] 6. `main`에 push → Actions 초록불 → 아래 "확인"
+- [x] 7. 가짜 은행 등록과 secret 연결 (아래 "가짜 은행 연결")
+- [x] 8. `/srv/monitor.sh`에 추가 (CRLF가 섞이지 않게):
   ```
   check_url "clearing-hub" "https://clearing-hub.ai-agent-develop.cloud"
   check_container_health "clearing-hub"
   check_container_health "clearing-hub-sim"
   ```
+
+## 첫 배포 (2026-11-05)
+
+- 커밋 `9caebda`: Actions 전 단계 성공(테스트 14개 포함) → `clearing-hub`·`clearing-hub-sim` 모두 `healthy`, 이미지 태그 = 커밋, 마이그레이션 `ef6bf3b35409` 적용
+- 메모리: 허브 83MB / 256MB, 가짜 은행 38MB / 128MB (배포 전 서버 여유 약 770MB)
+- HTTPS `/` 200, Let's Encrypt 인증서 발급
+- 가짜 은행 902 등록, `sim.env`에 secret 연결 후 재생성 → `ping` 200 (`holder_name` 김철수), 서명 없는 호출은 401
+- `monitor.sh`에 3줄 추가(백업 `monitor.sh.bak-*`), 실행 결과 `ok`
+- 걸린 것: 로컬(Windows, Docker Desktop)에는 arm64 에뮬레이션이 없어 이미지를 직접 빌드할 수 없다. 배포는 Actions로만 한다
 
 ## 확인
 

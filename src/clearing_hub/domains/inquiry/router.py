@@ -37,4 +37,7 @@ async def inquiry(
         return InquiryResponse(**data.model_dump(), holder_name=str(reply.body["holder_name"]))
     if reply.rejected:
         raise ApiException(reply.status, reply.error, str(reply.body.get("message") or "받는 은행이 조회를 거절했습니다"))
-    raise ApiException(502 if reply.status else 504, reply.error, "받는 은행이 응답하지 않습니다")
+    # 5xx·타임아웃은 받는 은행의 오류 코드를 그대로 넘기지 않고 허브 코드로 바꾼다 (SPEC 3.2)
+    if reply.status is None:
+        raise ApiException(504, "RECEIVER_TIMEOUT", "받는 은행이 응답하지 않습니다")
+    raise ApiException(502, "RECEIVER_ERROR", "받는 은행에 일시 장애가 있습니다")

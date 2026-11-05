@@ -1,4 +1,4 @@
-# ClearingHub 참가 은행 연동 규격 v0.4 (초안)
+# ClearingHub 참가 은행 연동 규격 v0.4.3 (초안)
 
 - 작성일: 2026-11-05
 - 대상: ClearingHub(은행 간 이체 중계 서버)에 참가하려는 은행 서버 개발팀
@@ -26,7 +26,7 @@
 | 거래 ID (`transfer_id`) | 보내는 은행이 만드는 UUID v4 문자열(소문자). **같은 ID는 어디서든 한 번만 처리된다** (멱등성 키) |
 | 시각 | ISO 8601, UTC, 초 단위 (`"2026-11-05T01:20:00Z"`). 응답에만 쓰인다 |
 | 이름 | `sender_name`, `holder_name`은 최대 50자 |
-| 메모 | `memo`는 최대 100자, 없으면 `""` |
+| 메모 | `memo`는 최대 100자. 선택 항목이며, 빼고 보내면 `""`로 본다. 허브가 받는 은행에 보낼 때(4.2)는 항상 넣는다 |
 | 타임아웃 | 허브 → 은행 호출은 **5초**. 은행 → 허브 호출은 10초를 권장 |
 
 ---
@@ -35,12 +35,14 @@
 
 허브는 은행마다 **API 키**와 **서명 비밀키(secret)**를 발급한다. 은행 → 허브, 허브 → 은행 요청 **모두** 같은 방식으로 서명한다. 받는 쪽은 서명이 맞을 때만 처리한다.
 
+**secret은 은행 하나에 하나이고 양방향에 같이 쓴다.** 은행은 허브에 보낼 때 이 secret으로 서명하고, 허브는 그 은행을 부를 때(4절·9.4) **같은 secret**으로 서명한다. 그래서 은행은 4절 API에서 받은 서명도 이 secret 하나로 검증하면 된다. 허브 관리자가 키를 다시 발급하면(`POST /admin/banks/{bank_code}/keys`) API 키와 secret이 함께 바뀌고, 그 순간부터 허브도 새 secret으로 서명한다. 따라서 은행은 새 값을 받는 즉시 보내는 쪽과 검증하는 쪽 설정을 같이 바꿔야 한다.
+
 ### 2.1 헤더
 
 | 헤더 | 값 |
 |---|---|
 | `X-Bank-Code` | 요청을 보내는 쪽의 은행 코드. 허브가 보낼 때는 `"000"` |
-| `X-Api-Key` | 발급받은 API 키 (허브가 은행에 보낼 때는 은행이 허브에 준 키, 없으면 생략 가능. 8절) |
+| `X-Api-Key` | 발급받은 API 키. 은행 → 허브에만 쓴다. **허브 → 은행 요청에는 넣지 않는다** (8절 3) |
 | `X-Timestamp` | Unix 시각(초), 10진 문자열. 예: `"1762300800"` |
 | `X-Signature` | 아래 방법으로 만든 HMAC-SHA256, 소문자 16진수 64자 |
 | `X-Request-ID` | (선택) 로그 추적 ID. 서명 대상 아님 (2.4) |
@@ -53,7 +55,8 @@ signature = hex( HMAC-SHA256( key = secret, message = UTF-8 bytes of message ) )
 ```
 
 - `body`는 **실제로 전송하는 바이트 그대로**다. 서명한 뒤에 JSON을 다시 직렬화하면 안 된다 (키 순서·공백이 바뀌면 서명이 틀린다). 본문이 없는 GET은 `body = ""`.
-- 받는 쪽은 `X-Timestamp`가 현재 시각과 **5분(300초)** 넘게 차이 나면 `SIGNATURE_EXPIRED`로 거절한다 (재전송 공격 방지).
+- 받는 쪽은 `X-Timestamp`가 현재 시각과 **5분(300초)** 넘게 차이 나면 `SIGNATURE_EXPIRED`로 거절한다 (재전송 공격 방지). 서버 시계는 NTP로 맞춰 둔다. 시계가 틀어지면 모든 요청이 `SIGNATURE_EXPIRED`로 거절된다.
+- 재전송할 때는 `X-Timestamp`와 `X-Signature`를 **새로 만든다**. 본문은 처음과 같아도 된다.
 - 서명 비교는 상수 시간 비교(`hmac.compare_digest`)를 쓴다.
 
 ### 2.3 예시 (검증용)
@@ -132,6 +135,8 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 
 오류: `BANK_NOT_FOUND`(404), `BANK_INACTIVE`(400), `ACCOUNT_NOT_FOUND`(404), `ACCOUNT_INACTIVE`(400), `RECEIVER_TIMEOUT`(504, 받는 은행 응답 없음), `RECEIVER_ERROR`(502, 받는 은행 5xx). 수취 조회는 허브가 재시도하지 않으므로 504·502면 사용자에게 잠시 뒤 다시 시도하라고 안내한다.
 
+`holder_name`은 받는 은행이 준 값을 **가리지 않고** 그대로 전달한다 (9.6). 화면에 가려서 보여 줄지(`김*수`)는 보내는 은행이 정한다.
+
 ### 3.3 이체 요청 `POST /v1/transfers`
 
 **보내는 은행은 이 요청 전에 자기 DB에서 출금을 끝내고**(중간 계정으로 옮기고) 이체 상태를 "처리 중"으로 저장해 둔다. 허브 응답에 따라 완료 또는 되돌림한다 (6절).
@@ -167,11 +172,22 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 ```
 보내는 은행은 **출금을 되돌리지 말고** 3.4로 결과를 확인한다.
 
-응답 `4xx` — 받는 은행이 거절한 경우 (5절 형식, `status: "FAILED"` 포함). 보내는 은행은 출금을 되돌린다.
+응답 `4xx` + `status: "FAILED"` — 이체가 확정 실패한 경우 (5절 형식). 보내는 은행은 출금을 되돌린다.
+```json
+{ "error": "ACCOUNT_NOT_FOUND", "message": "받는 계좌를 찾을 수 없습니다", "transfer_id": "7c9e6679-…", "status": "FAILED" }
+```
+`FAILED`가 붙는 경우는 두 가지다.
 
-같은 `transfer_id`가 다시 오면 허브는 새로 처리하지 않고 저장된 결과를 같은 형식으로 돌려준다 (`DUPLICATE_TRANSFER`가 아니라 **원래 결과**를 준다. 재전송한 쪽이 그대로 마무리할 수 있게 하기 위해서다).
+- 받는 은행이 거절함: `ACCOUNT_NOT_FOUND`(404), `ACCOUNT_INACTIVE`·`AMOUNT_INVALID`·`LIMIT_EXCEEDED`·`RECEIVER_ERROR`(400), `VALIDATION_ERROR`(422)
+- 허브가 접수 전에 거절함: `SAME_BANK`·`LIMIT_EXCEEDED`·`BANK_INACTIVE`·`ACCOUNT_REF_INVALID`(400), `BANK_NOT_FOUND`(404). 허브에 거래가 남지 않으므로 고친 뒤에는 **새 `transfer_id`**로 보낸다
 
-이 API의 응답은 위 세 가지(200 `COMPLETED`, 202 `PENDING`, 4xx `FAILED`)뿐이다. 재전송했을 때 허브가 아직 받는 은행을 부르는 중이거나 결과를 끝내 모르는 거래(3.4의 `ACCEPTED`·`DELIVERING`·`UNKNOWN`)도 202 `PENDING`으로 답한다. 할 일이 같기 때문이다: 되돌리지 말고 3.4로 확인한다.
+**`status: "FAILED"`가 없는 4xx는 이체 결과가 아니다.** 이 오류는 허브가 거래를 찾아보기 전, 요청 자체를 거절한 것이다. `UNAUTHORIZED`·`SIGNATURE_INVALID`·`SIGNATURE_EXPIRED`·`BANK_INACTIVE`(401), 본문 형식 오류 `VALIDATION_ERROR`(422), `FORBIDDEN`(403, 다른 은행이 쓴 `transfer_id`)가 여기에 해당한다. 같은 `transfer_id`로 앞서 보낸 요청이 접수됐을 수 있으므로 **출금을 되돌리지 않는다**. 6절의 순서를 따른다.
+
+응답 `5xx`(본문 형식 보장 없음, 5절)도 결과를 모르는 것이다. 되돌리지 말고 같은 `transfer_id`로 재전송한다.
+
+같은 `transfer_id`가 다시 오면 허브는 새로 처리하지 않고 저장된 결과를 같은 형식으로 돌려준다 (`DUPLICATE_TRANSFER`가 아니라 **원래 결과**를 준다. 재전송한 쪽이 그대로 마무리할 수 있게 하기 위해서다). 허브는 **본문을 비교하지 않는다**. 금액·계좌가 달라도 처음 거래의 결과를 준다. 그러니 새 이체에는 반드시 새 `transfer_id`를 만든다.
+
+이 API의 성공·결과 응답은 위 세 가지(200 `COMPLETED`, 202 `PENDING`, 4xx `FAILED`)뿐이다. 재전송했을 때 허브가 아직 받는 은행을 부르는 중이거나 결과를 끝내 모르는 거래(3.4의 `ACCEPTED`·`DELIVERING`·`UNKNOWN`)도 202 `PENDING`으로 답한다. 할 일이 같기 때문이다: 되돌리지 말고 3.4로 확인한다.
 
 ### 3.4 결과 조회 `GET /v1/transfers/{transfer_id}`
 
@@ -197,7 +213,9 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 | `ACCEPTED` / `DELIVERING` / `PENDING` | 기다렸다가 다시 조회 (권장: 30초 간격) |
 | `COMPLETED` | 이체 완료 처리 |
 | `FAILED` | 출금 되돌림 |
-| `UNKNOWN` | 허브가 재시도를 다 했는데도 결과를 모름. 허브 관리자가 확인 중. 되돌리지 말고 기다림 |
+| `UNKNOWN` | 허브가 재시도를 다 했는데도 결과를 모름 (접수 후 약 10분, 8절 7). 허브는 이 거래를 **더 이상 자동으로 확인하지 않고** 관리자가 받는 은행과 직접 맞춰 본다. 되돌리지 말고 6절의 "30분 뒤" 규칙을 따른다 |
+
+조회에 `404 TRANSFER_NOT_FOUND`가 오면 허브가 그 거래를 접수한 적이 없다는 뜻이다 (허브는 받는 은행을 부르기 **전에** 접수 기록을 저장한다). 이때는 출금을 되돌려도 된다.
 
 ---
 
@@ -242,11 +260,12 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 
 **은행이 지켜야 할 것**
 
-1. **멱등성**: `transfer_id`를 저장해 두고, 같은 ID가 다시 오면 입금하지 않고 `200 COMPLETED`를 다시 돌려준다. 허브는 타임아웃 뒤 같은 요청을 다시 보낸다.
-2. 입금과 `transfer_id` 저장은 **한 트랜잭션**으로 한다. 입금만 되고 ID 저장이 안 되면 다음 재시도에서 두 번 들어간다.
-3. 거절할 때는 `4xx` + 5절 형식. `ACCOUNT_NOT_FOUND`, `ACCOUNT_INACTIVE`, `AMOUNT_INVALID`, `LIMIT_EXCEEDED`(받는 쪽 한도가 있을 때)
-4. 일시 장애는 `5xx`. 허브는 5xx와 타임아웃만 재시도하고 4xx는 재시도하지 않는다.
-5. 거래내역에는 보낸 사람 이름과 보낸 은행 이름을 남긴다 (`"AvengersBank 홍길동"`).
+1. **멱등성**: `transfer_id`를 저장해 두고, 같은 ID가 다시 오면 입금하지 않고 `200 COMPLETED`를 다시 돌려준다. 허브는 타임아웃 뒤 같은 요청을 다시 보낸다. 허브의 재전송은 본문이 처음과 항상 같으므로, 본문을 비교하지 않고 저장된 결과를 주면 된다.
+2. 입금과 `transfer_id` 저장은 **한 트랜잭션**으로 한다. 입금만 되고 ID 저장이 안 되면 다음 재시도에서 두 번 들어간다. `transfer_id` 칸에는 **유니크 제약**을 건다. 같은 ID가 동시에 두 번 오면(첫 요청 처리 중 타임아웃 → 재전송) 하나는 제약에 걸려 롤백되고 입금은 한 번만 된다. 롤백된 쪽은 `5xx`로 답해도 된다 (허브가 4.3으로 다시 확인한다).
+3. **서명 검증은 입금 처리보다 먼저** 한다. 허브는 은행의 401·403을 "입금 전 거절"로 보고 이체를 `FAILED`로 끝낸다 (5절 `RECEIVER_ERROR`).
+4. 거절할 때는 `4xx` + 5절 형식. `ACCOUNT_NOT_FOUND`, `ACCOUNT_INACTIVE`, `AMOUNT_INVALID`, `LIMIT_EXCEEDED`(받는 쪽 한도가 있을 때), `VALIDATION_ERROR`(본문 형식 오류). 이 밖의 코드는 허브가 `RECEIVER_ERROR`로 바꾼다 (5절)
+5. 일시 장애는 `5xx`. 허브는 5xx와 타임아웃만 재시도하고 4xx는 재시도하지 않는다. **4xx를 준 거래는 저장하지 않는다.** 그래야 4.3이 404를 준다
+6. 거래내역에는 보낸 사람 이름과 보낸 은행 이름을 남긴다 (`"AvengersBank 홍길동"`).
 
 ### 4.3 입금 확인 `GET {base_url}/receive/{transfer_id}`
 
@@ -260,6 +279,8 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 `holder_name`은 권장 항목이다. 빠져 있으면 허브가 4.1 수취 조회로 이름을 채운다 (실패해도 이체 결과에는 영향 없음). 보내는 은행의 결과 조회(3.4)에서 받는 사람 이름이 비지 않게 하기 위해서다.
 
 응답 `404`: 그 ID로 입금한 적 없음 (`TRANSFER_NOT_FOUND`). 허브는 4.2를 다시 보낸다.
+
+**이 API의 응답은 위 둘(200 `COMPLETED`, 404 `TRANSFER_NOT_FOUND`)뿐이다.** 입금하지 않은 거래(4.2에서 4xx로 거절했거나 아직 처리 중)는 모두 404로 답한다. 허브는 200이어도 `status`가 `COMPLETED`가 아니면, 그리고 5xx·타임아웃이면 "확인 못 함"으로 보고 1분 뒤 다시 묻는다 (8절 7).
 
 ---
 
@@ -279,7 +300,7 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 
 | 코드 | HTTP | 뜻 | 누가 내는가 |
 |---|---|---|---|
-| `UNAUTHORIZED` | 401 | 은행 코드·API 키 불일치 | 허브·은행 |
+| `UNAUTHORIZED` | 401 | 허브: 은행 코드·API 키 불일치, 인증 헤더 없음. 은행: `X-Bank-Code`가 `"000"`이 아니거나 서명 헤더 없음 | 허브·은행 |
 | `SIGNATURE_INVALID` | 401 | 서명 불일치 | 허브·은행 |
 | `SIGNATURE_EXPIRED` | 401 | 시각 차이 5분 초과 | 허브·은행 |
 | `BANK_NOT_FOUND` | 404 | 없는 은행 코드 | 허브 |
@@ -308,15 +329,24 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 2. 허브 POST /v1/inquiry 로 예금주 확인 (확인 화면용, 생략 가능)
 3. [한 트랜잭션] 사용자 계좌 출금 → 타행 송금 중간 계정 입금, transfers.status = PENDING, transfer_id 생성
 4. 허브 POST /v1/transfers
-   ├ 200 COMPLETED → [트랜잭션] 중간 계정 차감, status = COMPLETED
-   ├ 4xx FAILED    → [트랜잭션] 중간 계정 → 사용자 계좌 되돌림, status = FAILED, 사용자에게 사유 안내
-   ├ 202 PENDING   → 30초마다 GET /v1/transfers/{id} (최대 30분), 결과에 따라 위 둘 중 하나
-   └ 통신 오류·타임아웃 → 같은 transfer_id로 POST 재전송 (멱등이라 안전). 계속 실패하면 PENDING 조회
-5. 서버 재시작 시 status = PENDING인 거래를 찾아 4의 조회부터 이어서 한다
+   ├ 200 COMPLETED                → [트랜잭션] 중간 계정 차감, status = COMPLETED
+   ├ 4xx + 본문 status "FAILED"   → [트랜잭션] 중간 계정 → 사용자 계좌 되돌림, status = FAILED, 사용자에게 사유 안내
+   ├ 202 PENDING                  → 4-1
+   ├ 4xx (본문에 status 없음)      → 되돌리지 않는다. 원인(서명·시계·API 키·본문)을 고치고 같은 transfer_id로 재전송.
+   │                                 못 고치면 4-1 (TRANSFER_NOT_FOUND면 되돌려도 된다)
+   └ 5xx·통신 오류·타임아웃         → 되돌리지 않는다. 같은 transfer_id로 POST 재전송 (멱등이라 안전).
+                                     계속 실패하면 4-1
+4-1. 30초마다 GET /v1/transfers/{id} (최대 30분)
+   ├ COMPLETED / FAILED   → 위와 같이 마무리
+   ├ 404 TRANSFER_NOT_FOUND → 허브가 접수하지 않음. 되돌린다
+   └ 30분이 지나도 ACCEPTED·DELIVERING·PENDING·UNKNOWN, 또는 조회 자체가 계속 실패
+                          → status = PENDING 그대로 두고 "확인 필요"로 표시, 허브 관리자에게 transfer_id를 알린다.
+                            자동 조회는 10분 간격으로 늦춰 계속한다 (관리자가 정리하면 COMPLETED·FAILED로 바뀐다)
+5. 서버 재시작 시 status = PENDING인 거래를 찾아 4-1부터 이어서 한다
 ```
 
 **하지 말아야 할 것**
-- 허브 응답을 모르는 상태에서 출금을 되돌리기 (입금이 됐을 수 있다 → 이중 지급)
+- 허브 응답을 모르는 상태에서 출금을 되돌리기 (입금이 됐을 수 있다 → 이중 지급). `status: "FAILED"` 없는 4xx·5xx·타임아웃도 "모르는 상태"다
 - 재전송할 때 `transfer_id`를 새로 만들기 (두 번 입금된다)
 - 허브 호출을 LLM 에이전트의 도구로 주기 (돈이 움직이는 호출은 이체 서비스 안에서만)
 
@@ -327,7 +357,15 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 1. 은행이 허브 관리자에게 **은행 이름, `base_url`**을 알린다.
 2. 허브 관리자가 은행을 등록하고(관리자 API `POST /admin/banks`) **은행 코드, API 키, secret**을 발급한다. secret은 등록할 때 한 번만 나오며, GitHub·채팅방이 아닌 개별 경로로 그 은행 팀에만 전달한다.
 3. 은행은 4절 API 3개를 만들고, 허브의 서명 검증을 붙인다.
-4. 허브 관리자가 `POST /admin/banks/{bank_code}/ping`으로 `{base_url}/inquiry` 호출이 되는지 확인한다. `base_url`은 허브 서버에서 접근할 수 있는 공개 HTTPS 주소여야 한다.
+4. 허브 관리자가 `POST /admin/banks/{bank_code}/ping`으로 `{base_url}/inquiry` 호출이 되는지 확인한다. 허브는 없는 계좌 `"000-000-000000"`으로 4.1을 부르고, 받은 HTTP 상태를 그대로 보여 준다. `base_url`은 허브 서버에서 접근할 수 있는 공개 HTTPS 주소여야 하고, 인증서는 공인 인증서여야 한다 (자체 서명 인증서 불가).
+
+   | ping 결과 `status` | 뜻 |
+   |---|---|
+   | `404` (`ACCOUNT_NOT_FOUND`) 또는 `200` | 정상: 연결·서명 검증 모두 됨 |
+   | `401`·`403` | 연결은 됐지만 서명 검증 실패. 은행이 가진 secret이 허브와 같은지, 검증에 원본 본문 바이트를 쓰는지 확인 (2절) |
+   | `404` (`error`가 `ACCOUNT_NOT_FOUND`가 아님) | `base_url` 경로가 틀림 |
+   | `5xx` | 은행 서버 오류 |
+   | `null` (`reachable: false`) | 연결 안 됨: 주소·방화벽·인증서·5초 타임아웃 확인 |
 5. 테스트 순서: 수취 조회 → 소액 이체 → 없는 계좌 → 같은 `transfer_id` 재전송(입금 1번만인지 확인). 받는 상대가 아직 없으면 허브의 가짜 은행 `902`로 보낸다. 받는 계좌번호 끝 4자리로 동작이 바뀐다: `0001` 정상, `0002` 계좌 없음, `0003` 지연(타임아웃), `0004` 5xx 두 번 뒤 성공, `0005` 입금은 됐는데 응답 없음.
 6. 참고 구현: [`src/bank_sim/main.py`](../src/bank_sim/main.py) (4절 API만 구현한 가짜 은행), 서명은 [`src/clearing_hub/core/signing.py`](../src/clearing_hub/core/signing.py). `bank_sim`은 허브 패키지의 `signing`을 import하므로, 따로 가져갈 때는 2.3의 참고 구현을 쓴다.
 
@@ -449,7 +487,7 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 
 ### 9.3 `account_ref`로 이체하기
 
-허브는 다른 은행의 **전체 계좌번호를 보내는 은행에 주지 않는다** (8절 14 초안). 대신 `account_ref`를 준다.
+허브는 다른 은행의 **전체 계좌번호를 보내는 은행에 주지 않는다** (8절 14). 대신 `account_ref`를 준다.
 
 - `account_ref`는 허브가 만든 불투명한 문자열이다. 허브만 실제 계좌번호를 알고 있다
 - **조회한 은행만**, 발급 후 **30분** 동안 쓸 수 있다. 여러 번 써도 된다 (같은 계좌로 두 번 보내기)
@@ -503,6 +541,7 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 - `CI_KEY`를 가진 은행은 누군가의 이름·생년월일·휴대폰번호만 알면 그 사람의 `ci`를 만들어 조회할 수 있다. 실제 CI도 성격이 같아서 동의 기록(`consent_id`), 조회 기록, 횟수 제한으로 막는다. 허브 관리자는 조회 기록을 보고 은행에 동의 기록을 요구할 수 있다
 - 이름 표기가 은행마다 다르면(한글·영문, 개명) 같은 사람을 찾지 못한다
 - 가상 CI는 본인인증이 아니다. 은행은 9.2를 부르기 전에 자기 로그인·추가 인증으로 고객 본인임을 확인해야 한다
+- 수취 조회(3.2)는 예금주 이름 전체를 돌려준다. 실제 금융권처럼 이름을 가리지 않으므로, 참가 은행은 아무 계좌번호나 넣어 이름을 알아낼 수 있다. 이 프로젝트에서는 참가 은행끼리 서로 믿는 것으로 보고 받아들인다. 화면에 가려서 보여 줄지는 보내는 은행이 정한다
 
 ---
 
@@ -517,3 +556,4 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 | 0.4 | 2026-11-05 | 2.4 추적 ID `X-Request-ID`(선택, 서명 제외, 허브가 받는 은행까지·재시도에도 같은 값으로 전달). 5절에 "5xx 본문은 형식을 보장하지 않는다, 상태 코드로 판단" 추가. 8절 결정 칸을 구현에 맞춰 채움(1·2·3·4·5·7·11·12·14·15 확정, 1번은 자동 배정이 아니라 관리자 지정으로 바로잡음, 6·8은 미정·미구현), 16 추가 |
 | 0.4.1 | 2026-11-05 | 허브를 규격에 맞춤: 받는 은행의 401·403을 `RECEIVER_ERROR`로 바꿔 전달(5절 표 설명 보강), 처리하지 못한 500에도 `X-Request-ID`(2.4), 응답 시각을 초 단위 UTC로(1절, 마이크로초 제거), `transfer_id`의 UUID v4 검사(1절) |
 | 0.4.2 | 2026-11-05 | 경미한 차이도 규격대로: 3.3 응답을 200 `COMPLETED`·202 `PENDING`·4xx `FAILED` 셋으로 한정(재전송 때 `ACCEPTED`·`DELIVERING`·`UNKNOWN`도 202 `PENDING`), 5절 표 밖 코드를 쓰지 않음(받는 은행의 표 밖 거절 코드 → `RECEIVER_ERROR`, HTTP 상태는 표대로, 허용하지 않는 메서드도 404 `NOT_FOUND`) |
+| 0.4.3 | 2026-11-05 | 다른 팀 배포 전 보강. 2절: secret 하나를 양방향에 쓴다는 점, 허브 → 은행에는 `X-Api-Key`를 넣지 않는다는 점, NTP, 재전송 때 서명 새로 만들기. 3.3: 4xx 본문 예시, `status: "FAILED"`가 붙는 경우와 붙지 않는 경우(401·403·422 → 되돌리지 않음), 5xx 처리, 같은 ID에 다른 본문. 3.4: `UNKNOWN`은 자동 확인 중단, `TRANSFER_NOT_FOUND`면 되돌려도 됨. 4.2: 유니크 제약·동시 요청, 서명 검증 먼저, 4xx 거래는 저장하지 않음. 4.3 응답을 200 `COMPLETED`·404 둘로 한정. 6절 분기를 다시 씀(30분 뒤 처리 포함). 7절 ping 결과 보는 법. 1절 `memo` 선택. 9.6에 이름을 가리지 않는다는 점. 허브: 접수 전 거절(`SAME_BANK`·`LIMIT_EXCEEDED`·`BANK_NOT_FOUND`·`BANK_INACTIVE`·`ACCOUNT_REF_INVALID`)에도 `status: "FAILED"`를 붙임 |

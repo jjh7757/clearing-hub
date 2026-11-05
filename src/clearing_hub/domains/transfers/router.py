@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clearing_hub.core.auth import current_bank, require_admin
 from clearing_hub.core.database import get_db
 from clearing_hub.core.exception_handlers import error_body, spec_http_status
+from clearing_hub.core.exceptions import ApiException
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.transfers import service
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
@@ -42,7 +43,16 @@ def _result_response(transfer: Transfer) -> JSONResponse:
 @router.post("", responses={200: {"model": TransferResult}, 202: {"model": TransferResult}})
 async def create_transfer(data: TransferRequest, db: DB, sender: Sender):
     """이체 요청 (SPEC 3.3). 보내는 은행은 이 요청 전에 출금을 끝내 둔다."""
-    transfer, _ = await service.accept_and_deliver(db, sender, data)
+    try:
+        transfer, _ = await service.accept_and_deliver(db, sender, data)
+    except ApiException as exc:
+        # 접수 전 거절(SAME_BANK·LIMIT_EXCEEDED·BANK_NOT_FOUND·BANK_INACTIVE·ACCOUNT_REF_INVALID): 거래가 허브에 없으므로
+        # 확정 실패다. `status: FAILED`를 붙여 보내는 은행이 되돌려도 된다고 알린다 (SPEC 3.3·6).
+        # 403 FORBIDDEN(남의 거래 ID)은 그 거래가 있다는 뜻이라 FAILED가 아니다
+        if exc.status_code not in (400, 404):
+            raise
+        return JSONResponse(status_code=exc.status_code,
+                            content={**error_body(exc.code, exc.message, data.transfer_id), "status": "FAILED"})
     return _result_response(transfer)
 
 

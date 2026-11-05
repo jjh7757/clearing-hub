@@ -90,9 +90,25 @@ async def test_validation(banks):
     res = await sender.post("/v1/transfers", {**transfer_payload("110-123-0001"), "transfer_id": "not-a-uuid"})
     assert res.status_code == 422
     res = await sender.post("/v1/transfers", transfer_payload("110-123-0001", amount=200_000_000))
-    assert res.json()["error"] == "LIMIT_EXCEEDED"
+    assert res.json()["error"] == "LIMIT_EXCEEDED" and res.json()["status"] == "FAILED"
     res = await sender.post("/v1/transfers", {**transfer_payload("110-123-0001"), "to_bank": "901"})
     assert res.status_code == 400 and res.json()["error"] == "SAME_BANK"  # 같은 은행 안의 이체
+    assert res.json()["status"] == "FAILED" and res.json()["transfer_id"]  # 접수 전 거절 → 되돌려도 된다 (SPEC 6)
+    res = await sender.post("/v1/transfers", {**transfer_payload("110-123-0001"), "to_bank": "999"})
+    assert res.status_code == 404 and res.json()["error"] == "BANK_NOT_FOUND" and res.json()["status"] == "FAILED"
+
+
+async def test_auth_and_validation_errors_are_not_failed(banks):
+    """401·422는 거래 조회 전에 난다. 앞선 시도가 접수됐을 수 있으므로 FAILED를 붙이지 않는다 (SPEC 6: 되돌리지 말고 3.4 확인)"""
+    sender, _ = banks
+    payload = transfer_payload("110-123-0001")
+    assert (await sender.post("/v1/transfers", payload)).status_code == 200  # 첫 시도는 접수·입금됨
+    res = await sender.post("/v1/transfers", payload, timestamp=1)  # 재전송이 시각 오차로 거절되는 상황
+    assert res.status_code == 401 and res.json()["error"] == "SIGNATURE_EXPIRED" and "status" not in res.json()
+    res = await sender.post("/v1/transfers", {**payload, "amount": 0})
+    assert res.status_code == 422 and "status" not in res.json()
+    detail = await sender.get(f"/v1/transfers/{payload['transfer_id']}")
+    assert detail.json()["status"] == "COMPLETED"  # 3.4로 확인하면 실제로는 완료
 
 
 async def test_timeout_then_retry_delivers_once(banks):

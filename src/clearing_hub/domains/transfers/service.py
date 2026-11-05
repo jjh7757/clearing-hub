@@ -70,7 +70,7 @@ async def accept_and_deliver(
     if data.amount > settings.max_transfer_amount:
         raise BadRequest("LIMIT_EXCEEDED", f"1회 이체 상한({settings.max_transfer_amount:,}원)을 넘었습니다", data.transfer_id)
     if data.to_bank == sender.bank_code:
-        raise BadRequest("AMOUNT_INVALID", "같은 은행 안의 이체는 중계하지 않습니다", data.transfer_id)
+        raise BadRequest("SAME_BANK", "같은 은행 안의 이체는 중계하지 않습니다", data.transfer_id)
     receiver = await bank_service.require_active_bank(db, data.to_bank, data.transfer_id)
 
     # 1) 접수 저장을 먼저 커밋한다. 이후 은행 호출 중에 허브가 죽어도 거래 기록은 남는다
@@ -97,6 +97,13 @@ async def get_transfer(db: AsyncSession, sender: Bank, transfer_id: str) -> Tran
     return transfer
 
 
+async def _fill_holder_name(transfer: Transfer, receiver: Bank, client: BankClient) -> None:
+    """입금 확인(SPEC 4.3) 응답에 이름이 없으면 수취 조회(4.1)로 채운다. 실패해도 이체 결과는 그대로 둔다."""
+    reply = await client.inquiry(receiver, transfer.to_account)
+    if reply.ok and reply.body.get("holder_name"):
+        transfer.holder_name = str(reply.body["holder_name"])[:50]
+
+
 async def confirm_pending(db: AsyncSession, client: BankClient = bank_client) -> int:
     """미확인 거래(PENDING, 또는 호출 중 허브가 죽어 DELIVERING으로 남은 것)를 받는 은행에 확인한다.
     재시도 태스크와 관리 화면의 '다시 확인'이 부른다. 확정(COMPLETED/FAILED)된 건수를 돌려준다."""
@@ -117,6 +124,8 @@ async def confirm_pending(db: AsyncSession, client: BankClient = bank_client) ->
             _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
         else:
             _set_status(db, transfer, TransferStatus.PENDING, f"확인 실패 (HTTP {status.status})")
+        if transfer.status == TransferStatus.COMPLETED and not transfer.holder_name:
+            await _fill_holder_name(transfer, receiver, client)
         if transfer.status in FINAL:
             confirmed += 1
         else:

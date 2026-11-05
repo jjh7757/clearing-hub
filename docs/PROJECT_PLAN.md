@@ -146,6 +146,7 @@ C은행 ────────┘   ├ banks      참가 은행 등록·키 �
 | `ACCOUNT_INACTIVE` | 해지·정지 계좌 | 출금 되돌림 |
 | `DUPLICATE_TRANSFER` | 같은 transfer_id, 결과 동봉 | 동봉된 결과로 마무리 |
 | `AMOUNT_INVALID` | 금액 오류 | 요청 수정 |
+| `SAME_BANK` | 받는 은행 = 보내는 은행 | 자체 이체로 처리 |
 | `RECEIVER_TIMEOUT` | 받는 은행 응답 없음, 상태 `PENDING` | 결과 조회로 확인 (3.2) |
 | `SIGNATURE_INVALID` / `UNAUTHORIZED` | 서명·키 오류 | 설정 확인 |
 

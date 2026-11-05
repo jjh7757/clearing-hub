@@ -20,6 +20,24 @@ async def test_inquiry(banks):
     assert res.json()["error"] == "BANK_NOT_FOUND"
 
 
+async def test_inquiry_receiver_failure_codes(banks, monkeypatch):
+    """받는 은행 5xx는 502 RECEIVER_ERROR, 응답 없음은 504 RECEIVER_TIMEOUT (은행의 오류 코드를 넘기지 않는다)."""
+    from clearing_hub.core import bank_client as bank_client_module
+    from clearing_hub.core.bank_client import BankReply
+
+    sender, _ = banks
+    replies = iter([BankReply(500, {"error": "INTERNAL_ERROR"}), BankReply(None, {})])
+
+    async def failing(self, bank, account_num):
+        return next(replies)
+
+    monkeypatch.setattr(bank_client_module.BankClient, "inquiry", failing)
+    res = await sender.post("/v1/inquiry", {"to_bank": "902", "to_account": "110-123-0001"})
+    assert res.status_code == 502 and res.json()["error"] == "RECEIVER_ERROR"
+    res = await sender.post("/v1/inquiry", {"to_bank": "902", "to_account": "110-123-0001"})
+    assert res.status_code == 504 and res.json()["error"] == "RECEIVER_TIMEOUT"
+
+
 async def test_transfer_completed(banks):
     sender, _ = banks
     payload = transfer_payload("110-123-0001")
@@ -74,7 +92,7 @@ async def test_validation(banks):
     res = await sender.post("/v1/transfers", transfer_payload("110-123-0001", amount=200_000_000))
     assert res.json()["error"] == "LIMIT_EXCEEDED"
     res = await sender.post("/v1/transfers", {**transfer_payload("110-123-0001"), "to_bank": "901"})
-    assert res.status_code == 400  # 같은 은행 안의 이체
+    assert res.status_code == 400 and res.json()["error"] == "SAME_BANK"  # 같은 은행 안의 이체
 
 
 async def test_timeout_then_retry_delivers_once(banks):
@@ -110,7 +128,30 @@ async def test_received_but_no_answer_confirmed_by_status(banks):
         assert await confirm_pending(db) == 1
     detail = await sender.get(f"/v1/transfers/{payload['transfer_id']}")
     assert detail.json()["status"] == "COMPLETED"
+    assert detail.json()["holder_name"] == "김철수"  # 입금 확인(4.3) 응답의 이름
     assert len(sim.received) == 1
+
+
+async def test_confirmed_without_holder_name_fills_by_inquiry(banks, monkeypatch):
+    """입금 확인(4.3) 응답에 holder_name이 없는 은행이면 수취 조회(4.1)로 채운다."""
+    from clearing_hub.core import bank_client as bank_client_module
+
+    sender, _ = banks
+    payload = transfer_payload("110-123-0005")
+    await sender.post("/v1/transfers", payload)
+
+    original = bank_client_module.BankClient.receive_status
+
+    async def without_name(self, bank, transfer_id):
+        reply = await original(self, bank, transfer_id)
+        reply.body.pop("holder_name", None)
+        return reply
+
+    monkeypatch.setattr(bank_client_module.BankClient, "receive_status", without_name)
+    async with SessionLocal() as db:
+        assert await confirm_pending(db) == 1
+    detail = await sender.get(f"/v1/transfers/{payload['transfer_id']}")
+    assert detail.json()["status"] == "COMPLETED" and detail.json()["holder_name"] == "김철수"
 
 
 async def test_server_error_then_success(banks):

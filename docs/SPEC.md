@@ -1,4 +1,4 @@
-# ClearingHub 참가 은행 연동 규격 v0.1 (초안)
+# ClearingHub 참가 은행 연동 규격 v0.2 (초안)
 
 - 작성일: 2026-11-05
 - 대상: ClearingHub(은행 간 이체 중계 서버)에 참가하려는 은행 서버 개발팀
@@ -20,7 +20,7 @@
 |---|---|
 | 프로토콜 | HTTPS, JSON (`Content-Type: application/json; charset=utf-8`) |
 | 문자 | UTF-8 |
-| 금액 | **정수, 원 단위** (예: 50000). 소수·문자열·음수·0은 거절 |
+| 금액 | **정수, 원 단위** (예: 50000). 소수·문자열·음수·0은 `VALIDATION_ERROR`(422)로 거절. 허브 1회 상한(1억 원) 초과는 `LIMIT_EXCEEDED`(400) |
 | 은행 코드 | 허브가 배정하는 숫자 3자리 문자열 (예: `"901"`). 앞자리 0이 있을 수 있으므로 문자열로 다룬다 |
 | 계좌번호 | 문자열. 허브는 형식을 검사하지 않고 받는 은행에 그대로 전달한다. 하이픈 포함 여부는 각 은행이 정한다 (예: `"110-123-456789"`) |
 | 거래 ID (`transfer_id`) | 보내는 은행이 만드는 UUID v4 문자열(소문자). **같은 ID는 어디서든 한 번만 처리된다** (멱등성 키) |
@@ -90,7 +90,7 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 
 ## 3. 은행 → 허브 API
 
-기본 주소: `https://<허브 도메인>/v1`
+기본 주소: `https://clearing-hub.ai-agent-develop.cloud/v1` (API 문서: `https://clearing-hub.ai-agent-develop.cloud/docs`)
 
 ### 3.1 참가 은행 목록 `GET /v1/banks`
 
@@ -114,7 +114,7 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 { "to_bank": "902", "to_account": "110-123-0001", "holder_name": "김철수" }
 ```
 
-오류: `BANK_NOT_FOUND`, `BANK_INACTIVE`, `ACCOUNT_NOT_FOUND`, `ACCOUNT_INACTIVE`, `RECEIVER_TIMEOUT`, `RECEIVER_ERROR`
+오류: `BANK_NOT_FOUND`(404), `BANK_INACTIVE`(400), `ACCOUNT_NOT_FOUND`(404), `ACCOUNT_INACTIVE`(400), `RECEIVER_TIMEOUT`(504, 받는 은행 응답 없음), `RECEIVER_ERROR`(502, 받는 은행 5xx). 수취 조회는 허브가 재시도하지 않으므로 504·502면 사용자에게 잠시 뒤 다시 시도하라고 안내한다.
 
 ### 3.3 이체 요청 `POST /v1/transfers`
 
@@ -236,8 +236,10 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 
 응답 `200`
 ```json
-{ "transfer_id": "7c9e6679-…", "status": "COMPLETED", "received_at": "2026-11-05T01:20:02Z" }
+{ "transfer_id": "7c9e6679-…", "status": "COMPLETED", "holder_name": "김철수", "received_at": "2026-11-05T01:20:02Z" }
 ```
+
+`holder_name`은 권장 항목이다. 빠져 있으면 허브가 4.1 수취 조회로 이름을 채운다 (실패해도 이체 결과에는 영향 없음). 보내는 은행의 결과 조회(3.4)에서 받는 사람 이름이 비지 않게 하기 위해서다.
 
 응답 `404`: 그 ID로 입금한 적 없음 (`TRANSFER_NOT_FOUND`). 허브는 4.2를 다시 보낸다.
 
@@ -259,16 +261,18 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 | `SIGNATURE_INVALID` | 401 | 서명 불일치 | 허브·은행 |
 | `SIGNATURE_EXPIRED` | 401 | 시각 차이 5분 초과 | 허브·은행 |
 | `BANK_NOT_FOUND` | 404 | 없는 은행 코드 | 허브 |
-| `BANK_INACTIVE` | 400 | 비활성 은행 | 허브 |
+| `BANK_INACTIVE` | 400 / 401 | 받는 은행이 비활성이면 400, 요청한 은행 자신이 비활성이면 401 | 허브 |
 | `ACCOUNT_NOT_FOUND` | 404 | 받는 계좌 없음 | 은행 (허브가 전달) |
 | `ACCOUNT_INACTIVE` | 400 | 해지·정지 계좌 | 은행 |
-| `AMOUNT_INVALID` | 400 | 금액 형식·범위 오류 | 허브·은행 |
+| `AMOUNT_INVALID` | 400 | 받는 은행 기준으로 받을 수 없는 금액 (허브는 금액 형식 오류에 `VALIDATION_ERROR`를 낸다) | 은행 |
 | `LIMIT_EXCEEDED` | 400 | 허브 1회 상한 또는 받는 은행 한도 초과 | 허브·은행 |
-| `VALIDATION_ERROR` | 422 | 필드 누락·형식 오류 (`message`에 필드 이름) | 허브·은행 |
+| `SAME_BANK` | 400 | 받는 은행이 보내는 은행과 같음 (같은 은행 안의 이체는 자체 처리) | 허브 |
+| `VALIDATION_ERROR` | 422 | 필드 누락·형식 오류, 금액이 0·음수·소수·문자열 (`message`에 필드 이름) | 허브·은행 |
 | `TRANSFER_NOT_FOUND` | 404 | 모르는 `transfer_id` | 허브·은행 |
 | `FORBIDDEN` | 403 | 남의 은행 거래 조회 | 허브 |
-| `RECEIVER_TIMEOUT` | 202 (본문 `status: PENDING`) | 받는 은행 응답 없음 | 허브 |
-| `RECEIVER_ERROR` | 502 | 받는 은행 5xx. 이체는 `PENDING`으로 재시도, 조회는 즉시 실패 | 허브 |
+| `RECEIVER_TIMEOUT` | 202 / 504 | 받는 은행 응답 없음. 이체는 202(본문 `status: PENDING`), 수취 조회는 504 | 허브 |
+| `RECEIVER_ERROR` | 502 | 받는 은행 5xx. 이체는 `PENDING`으로 재시도, 수취 조회는 즉시 실패 | 허브 |
+| `NOT_FOUND` | 404 | 없는 경로 (주소 오타) | 허브 |
 | `INTERNAL_ERROR` | 500 | 그 밖의 오류 | 허브·은행 |
 
 ---
@@ -297,11 +301,11 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 ## 7. 연동 절차
 
 1. 은행이 허브 관리자에게 **은행 이름, `base_url`**을 알린다.
-2. 허브가 **은행 코드, API 키, secret**을 발급한다 (관리 사이트 → 참가 은행 → 키 발급). secret은 한 번만 보여 준다.
+2. 허브 관리자가 은행을 등록하고(관리자 API `POST /admin/banks`) **은행 코드, API 키, secret**을 발급한다. secret은 등록할 때 한 번만 나오며, GitHub·채팅방이 아닌 개별 경로로 그 은행 팀에만 전달한다.
 3. 은행은 4절 API 3개를 만들고, 허브의 서명 검증을 붙인다.
-4. 허브 관리 사이트의 "연결 상태 확인" 버튼으로 `{base_url}/inquiry` 호출이 되는지 확인한다.
-5. 테스트 순서: 수취 조회 → 소액 이체 → 없는 계좌 → 같은 `transfer_id` 재전송(입금 1번만인지 확인).
-6. 참고 구현: 저장소의 `bank_sim/` (4절 API만 구현한 가짜 은행). 서명 검증 코드를 그대로 가져가도 된다.
+4. 허브 관리자가 `POST /admin/banks/{bank_code}/ping`으로 `{base_url}/inquiry` 호출이 되는지 확인한다. `base_url`은 허브 서버에서 접근할 수 있는 공개 HTTPS 주소여야 한다.
+5. 테스트 순서: 수취 조회 → 소액 이체 → 없는 계좌 → 같은 `transfer_id` 재전송(입금 1번만인지 확인). 받는 상대가 아직 없으면 허브의 가짜 은행 `902`로 보낸다. 받는 계좌번호 끝 4자리로 동작이 바뀐다: `0001` 정상, `0002` 계좌 없음, `0003` 지연(타임아웃), `0004` 5xx 두 번 뒤 성공, `0005` 입금은 됐는데 응답 없음.
+6. 참고 구현: [`src/bank_sim/main.py`](../src/bank_sim/main.py) (4절 API만 구현한 가짜 은행), 서명은 [`src/clearing_hub/core/signing.py`](../src/clearing_hub/core/signing.py). `bank_sim`은 허브 패키지의 `signing`을 import하므로, 따로 가져갈 때는 2.3의 참고 구현을 쓴다.
 
 ---
 
@@ -317,7 +321,7 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 | 6 | 받는 은행이 거절할 수 있는 조건 | 계좌 없음·정지·한도 초과만 | |
 | 7 | 재시도 간격·횟수 | 1분 × 10회, 이후 `UNKNOWN` | |
 | 8 | 정산 시각·방식 | 매일 00:05 KST, 전날 `COMPLETED` 상계, 표시만 | |
-| 9 | 허브 도메인, 테스트 환경 주소 | 미정 | |
+| 9 | 허브 도메인, 테스트 환경 주소 | 허브: `https://clearing-hub.ai-agent-develop.cloud`. 별도 테스트 환경 없이 가짜 은행 `902`로 시험 (7절 5) | 확정 (2026-11-05 배포) |
 | 10 | 사기 신고 계좌 공유 (선택) | v1.1 | |
 
 ---
@@ -327,3 +331,4 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 | 버전 | 날짜 | 내용 |
 |---|---|---|
 | 0.1 | 2026-11-05 | 초안 |
+| 0.2 | 2026-11-05 | 허브 주소 기입, 4.3 응답에 `holder_name`(권장) 추가, `SAME_BANK` 추가, 금액·비활성 은행·수취 조회 오류의 HTTP 코드를 구현에 맞춤, 연동 절차를 관리자 API 기준으로 정리, 가짜 은행 시험 계좌 안내 |

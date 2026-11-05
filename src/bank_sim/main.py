@@ -115,7 +115,7 @@ async def receive_status(transfer_id: str):
     record = received.get(transfer_id)
     if record is None:
         return _error(404, "TRANSFER_NOT_FOUND", "그 거래 ID로 입금한 적이 없습니다", transfer_id)
-    return {"transfer_id": transfer_id, "status": "COMPLETED", "received_at": record["received_at"]}
+    return {"transfer_id": transfer_id, "status": "COMPLETED", "holder_name": HOLDER_NAME, "received_at": record["received_at"]}
 
 
 @app.get("/")

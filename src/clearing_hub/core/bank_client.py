@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from clearing_hub.core.config import get_settings
+from clearing_hub.core.request_id import REQUEST_ID_HEADER, get_request_id
 from clearing_hub.core.signing import HUB_BANK_CODE, sign
 from clearing_hub.domains.banks.models import Bank
 
@@ -51,10 +52,16 @@ class BankClient:
             self._client = httpx.AsyncClient()
         return self._client
 
-    async def _request(self, bank: Bank, method: str, path: str, payload: dict | None = None) -> BankReply:
+    async def _request(
+        self, bank: Bank, method: str, path: str, payload: dict | None = None, request_id: str | None = None
+    ) -> BankReply:
         url = bank.base_url.rstrip("/") + path
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode() if payload is not None else b""
         headers = {"X-Bank-Code": HUB_BANK_CODE, "Content-Type": "application/json; charset=utf-8", **sign(bank.hmac_secret, body)}
+        # 추적 ID (SPEC 2.4): 거래에 저장된 값 > 지금 요청의 값. 재시도 태스크처럼 요청 밖이면 저장된 값만 쓴다
+        request_id = request_id or get_request_id()
+        if request_id:
+            headers[REQUEST_ID_HEADER] = request_id
         timeout = get_settings().receiver_timeout_seconds
         try:
             # ASGITransport에는 httpx 타임아웃이 걸리지 않으므로 wait_for로 감싼다
@@ -62,7 +69,8 @@ class BankClient:
                 self.client.request(method, url, content=body, headers=headers, timeout=timeout), timeout
             )
         except (TimeoutError, httpx.HTTPError) as exc:
-            logger.warning("은행 %s 응답 없음: %s %s (%s)", bank.bank_code, method, path, type(exc).__name__)
+            logger.warning("은행 %s 응답 없음: %s %s (%s) [request_id=%s]", bank.bank_code, method, path,
+                           type(exc).__name__, request_id or "-")
             return BankReply(None, {})
         try:
             data = response.json() if response.content else {}
@@ -70,14 +78,14 @@ class BankClient:
             data = {}
         return BankReply(response.status_code, data if isinstance(data, dict) else {})
 
-    async def inquiry(self, bank: Bank, account_num: str) -> BankReply:
-        return await self._request(bank, "POST", "/inquiry", {"account_num": account_num})
+    async def inquiry(self, bank: Bank, account_num: str, request_id: str | None = None) -> BankReply:
+        return await self._request(bank, "POST", "/inquiry", {"account_num": account_num}, request_id)
 
-    async def receive(self, bank: Bank, payload: dict) -> BankReply:
-        return await self._request(bank, "POST", "/receive", payload)
+    async def receive(self, bank: Bank, payload: dict, request_id: str | None = None) -> BankReply:
+        return await self._request(bank, "POST", "/receive", payload, request_id)
 
-    async def receive_status(self, bank: Bank, transfer_id: str) -> BankReply:
-        return await self._request(bank, "GET", f"/receive/{transfer_id}")
+    async def receive_status(self, bank: Bank, transfer_id: str, request_id: str | None = None) -> BankReply:
+        return await self._request(bank, "GET", f"/receive/{transfer_id}", request_id=request_id)
 
     async def accounts(self, bank: Bank, ci: str) -> BankReply:
         return await self._request(bank, "POST", "/accounts", {"ci": ci})

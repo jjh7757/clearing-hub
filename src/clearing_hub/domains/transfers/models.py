@@ -32,6 +32,7 @@ class Transfer(Base):
     fail_code: Mapped[str | None] = mapped_column(String(40))
     fail_message: Mapped[str | None] = mapped_column(String(200))
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    request_id: Mapped[str | None] = mapped_column(String(128))  # 접수 때의 X-Request-ID. 재시도 호출에도 같은 값 (SPEC 2.4)
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 받는 은행에 처음 보낸 시각
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # COMPLETED/FAILED 확정 시각

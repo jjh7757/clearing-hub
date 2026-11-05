@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clearing_hub.core.bank_client import BankClient, BankReply, bank_client
 from clearing_hub.core.config import get_settings
+from clearing_hub.core.request_id import get_request_id
 from clearing_hub.core.exceptions import BadRequest, Forbidden, NotFound
 from clearing_hub.domains.accounts import service as account_service
 from clearing_hub.domains.banks import service as bank_service
@@ -79,7 +80,8 @@ async def accept_and_deliver(
 
     # 1) 접수 저장을 먼저 커밋한다. 이후 은행 호출 중에 허브가 죽어도 거래 기록은 남는다
     transfer = Transfer(**data.model_dump(exclude={"to_account", "to_account_ref"}), to_account=to_account,
-                        from_bank=sender.bank_code, status=TransferStatus.ACCEPTED)
+                        from_bank=sender.bank_code, status=TransferStatus.ACCEPTED,
+                        request_id=get_request_id())  # 재시도에도 같은 추적 ID를 보낸다 (SPEC 2.4)
     db.add(transfer)
     db.add(TransferEvent(transfer_id=transfer.transfer_id, from_status=None, to_status=TransferStatus.ACCEPTED, detail="접수"))
     _set_status(db, transfer, TransferStatus.DELIVERING, f"{receiver.name}에 전달")
@@ -87,7 +89,7 @@ async def accept_and_deliver(
     await db.commit()
 
     # 2) 받는 은행 호출
-    reply = await client.receive(receiver, _receive_payload(transfer, sender))
+    reply = await client.receive(receiver, _receive_payload(transfer, sender), transfer.request_id)
     _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
     await db.commit()
     return transfer, False
@@ -104,7 +106,7 @@ async def get_transfer(db: AsyncSession, sender: Bank, transfer_id: str) -> Tran
 
 async def _fill_holder_name(transfer: Transfer, receiver: Bank, client: BankClient) -> None:
     """입금 확인(SPEC 4.3) 응답에 이름이 없으면 수취 조회(4.1)로 채운다. 실패해도 이체 결과는 그대로 둔다."""
-    reply = await client.inquiry(receiver, transfer.to_account)
+    reply = await client.inquiry(receiver, transfer.to_account, transfer.request_id)
     if reply.ok and reply.body.get("holder_name"):
         transfer.holder_name = str(reply.body["holder_name"])[:50]
 
@@ -120,12 +122,12 @@ async def confirm_pending(db: AsyncSession, client: BankClient = bank_client) ->
         sender = await db.get(Bank, transfer.from_bank)
         if receiver is None or sender is None:
             continue
-        status = await client.receive_status(receiver, transfer.transfer_id)
+        status = await client.receive_status(receiver, transfer.transfer_id, transfer.request_id)
         if status.ok and status.body.get("status") == "COMPLETED":
             _apply_reply(db, transfer, status, no_answer_status=TransferStatus.PENDING)
         elif status.status == 404:
             # 은행이 그 ID로 입금한 적 없음 → /receive를 다시 보낸다 (은행 쪽 멱등 처리에 기댄다)
-            reply = await client.receive(receiver, _receive_payload(transfer, sender))
+            reply = await client.receive(receiver, _receive_payload(transfer, sender), transfer.request_id)
             _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
         else:
             _set_status(db, transfer, TransferStatus.PENDING, f"확인 실패 (HTTP {status.status})")

@@ -28,7 +28,7 @@ async def test_inquiry_receiver_failure_codes(banks, monkeypatch):
     sender, _ = banks
     replies = iter([BankReply(500, {"error": "INTERNAL_ERROR"}), BankReply(None, {})])
 
-    async def failing(self, bank, account_num):
+    async def failing(self, bank, account_num, request_id=None):
         return next(replies)
 
     monkeypatch.setattr(bank_client_module.BankClient, "inquiry", failing)
@@ -142,8 +142,8 @@ async def test_confirmed_without_holder_name_fills_by_inquiry(banks, monkeypatch
 
     original = bank_client_module.BankClient.receive_status
 
-    async def without_name(self, bank, transfer_id):
-        reply = await original(self, bank, transfer_id)
+    async def without_name(self, bank, transfer_id, request_id=None):
+        reply = await original(self, bank, transfer_id, request_id)
         reply.body.pop("holder_name", None)
         return reply
 

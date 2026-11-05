@@ -53,6 +53,7 @@ async def client(monkeypatch):
         await conn.run_sync(Base.metadata.create_all)
     sim.received.clear()
     sim.server_errors_left.clear()
+    sim.seen_request_ids.clear()
     # 허브 → 은행 호출을 가짜 은행 앱(bank_sim)으로 보낸다
     sim_client = AsyncClient(transport=ASGITransport(app=sim.app), base_url="http://sim")
     monkeypatch.setattr(bank_client_module.bank_client, "_client", sim_client)

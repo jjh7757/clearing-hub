@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from clearing_hub.core.database import engine
 from clearing_hub.core.exception_handlers import register_exception_handlers
+from clearing_hub.core.request_id import RequestIdMiddleware
 from clearing_hub.domains.accounts.router import admin_router as account_admin_router
 from clearing_hub.domains.accounts.router import router as account_router
 from clearing_hub.domains.banks.router import admin_router as bank_admin_router
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ClearingHub", lifespan=lifespan)
+app.add_middleware(RequestIdMiddleware)  # X-Request-ID 받기·만들기·응답에 붙이기 (SPEC 2.4)
 register_exception_handlers(app)
 app.include_router(bank_router)
 app.include_router(inquiry_router)
@@ -40,4 +42,4 @@ app.include_router(account_admin_router)
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v0.3"}  # docs/SPEC.md 버전과 맞춘다
+    return {"service": "ClearingHub", "spec": "v0.4"}  # docs/SPEC.md 버전과 맞춘다

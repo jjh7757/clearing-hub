@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import logging
 import os
 from datetime import UTC, datetime
 from typing import Annotated
@@ -28,6 +29,8 @@ HOLDER_NAME = "김철수"
 app = FastAPI(title="BankSim (가짜 은행)")
 received: dict[str, dict] = {}  # transfer_id → 입금 기록 (멱등성)
 server_errors_left: dict[str, int] = {}  # 0004: transfer_id → 남은 500 횟수
+seen_request_ids: list[tuple[str, str | None]] = []  # (경로, 받은 X-Request-ID). 최근 것만 둔다
+logger = logging.getLogger("bank_sim")
 
 
 def _error(status: int, code: str, message: str, transfer_id: str | None = None) -> JSONResponse:
@@ -52,8 +55,13 @@ async def verify_hub(
     x_bank_code: Annotated[str | None, Header()] = None,
     x_timestamp: Annotated[str | None, Header()] = None,
     x_signature: Annotated[str | None, Header()] = None,
+    x_request_id: Annotated[str | None, Header()] = None,
 ) -> None:
     """허브(X-Bank-Code 000)의 서명을 허브가 준 secret으로 검증한다. secret이 없으면 검증하지 않는다 (로컬 시험용)."""
+    # SPEC 2.4: 추적 ID는 서명 대상이 아니다. 받은 그대로 로그에 남긴다 (없어도·형식이 틀려도 거절하지 않는다)
+    seen_request_ids.append((request.url.path, x_request_id))
+    del seen_request_ids[:-100]  # 오래 켜 둬도 메모리가 쌓이지 않게
+    logger.info("허브 요청 %s %s [request_id=%s]", request.method, request.url.path, x_request_id or "-")
     secret = os.environ.get("SIM_HUB_SECRET")
     if not secret:
         return

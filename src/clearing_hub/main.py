@@ -36,4 +36,4 @@ app.include_router(transfer_admin_router)
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v0.1"}
+    return {"service": "ClearingHub", "spec": "v0.3"}  # docs/SPEC.md 버전과 맞춘다

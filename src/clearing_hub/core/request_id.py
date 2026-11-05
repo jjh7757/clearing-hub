@@ -6,6 +6,7 @@
 - 서명 대상이 아니다. 로그 추적용이라 바뀌어도 돈의 흐름에는 영향이 없다.
 """
 
+import json
 import logging
 import re
 import time
@@ -15,6 +16,7 @@ from contextvars import ContextVar
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 access_logger = logging.getLogger("clearing_hub.access")
+error_logger = logging.getLogger("clearing_hub.error")
 REQUEST_ID_HEADER = "X-Request-ID"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -47,11 +49,12 @@ class RequestIdMiddleware:
         token = _request_id.set(request_id)
         started = time.perf_counter()
         status = 500  # 응답을 못 보내고 예외가 나면 500으로 남긴다
+        started_response = False
 
         async def send_with_id(message: Message) -> None:
-            nonlocal status
+            nonlocal status, started_response
             if message["type"] == "http.response.start":
-                status = message["status"]
+                status, started_response = message["status"], True
                 headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"x-request-id"]
                 headers.append((b"x-request-id", request_id.encode("latin-1")))
                 message = {**message, "headers": headers}
@@ -59,6 +62,14 @@ class RequestIdMiddleware:
 
         try:
             await self.app(scope, receive, send_with_id)
+        except Exception:
+            # 처리하지 못한 예외: 여기서 SPEC 5절 형식의 500을 보내야 X-Request-ID가 붙는다 (SPEC 2.4 "모든 응답").
+            # 바깥(Starlette ServerErrorMiddleware)으로 넘기면 이 미들웨어 밖에서 응답이 만들어져 헤더가 빠진다
+            error_logger.exception("처리하지 못한 오류: %s %s", scope.get("method", ""), scope.get("path", ""),
+                                   extra={"request_id": request_id})
+            if started_response:
+                raise  # 응답을 이미 보내기 시작했으면 바꿀 수 없다
+            await _send_internal_error(send_with_id)
         finally:
             # 접근 로그: 요청마다 한 줄 (요청한 은행 코드도 남겨 어느 은행 요청인지 바로 보이게)
             duration_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -74,3 +85,13 @@ class RequestIdMiddleware:
                        "bank_code": bank_code, "client": client[0] if client else None},
             )
             _request_id.reset(token)
+
+
+async def _send_internal_error(send: Send) -> None:
+    body = json.dumps({"error": "INTERNAL_ERROR", "message": "서버에서 오류가 발생했습니다"}, ensure_ascii=False).encode()
+    await send({
+        "type": "http.response.start",
+        "status": 500,
+        "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
+    })
+    await send({"type": "http.response.body", "body": body})

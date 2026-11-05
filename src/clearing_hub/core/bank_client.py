@@ -36,8 +36,26 @@ class BankReply:
         return not self.ok and not self.rejected
 
     @property
+    def auth_failed(self) -> bool:
+        """받는 은행이 허브의 서명·인증을 거절(401·403). 보내는 은행 잘못이 아니라 허브 ↔ 받는 은행 설정 문제다.
+        은행은 서명 검증을 처리보다 먼저 하므로(SPEC 4절) 입금은 되지 않았다."""
+        return self.status in (401, 403)
+
+    @property
     def error(self) -> str:
-        return str(self.body.get("error") or ("RECEIVER_TIMEOUT" if self.status is None else "RECEIVER_ERROR"))
+        """보내는 은행에 알릴 오류 코드. 받는 은행의 인증 오류(SIGNATURE_INVALID 등)는 보내는 은행이
+        자기 서명이 틀렸다고 오해하지 않게 RECEIVER_ERROR로 바꾼다 (SPEC 5절)."""
+        if self.auth_failed:
+            return "RECEIVER_ERROR"
+        code = self.body.get("error")
+        return str(code) if isinstance(code, str) and code else ("RECEIVER_TIMEOUT" if self.status is None else "RECEIVER_ERROR")
+
+    @property
+    def message(self) -> str | None:
+        if self.auth_failed:
+            return "받는 은행과 허브의 연결 설정에 문제가 있습니다. 허브 관리자에게 알려 주세요"
+        message = self.body.get("message")
+        return str(message) if message else None
 
 
 class BankClient:

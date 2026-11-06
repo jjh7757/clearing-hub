@@ -40,7 +40,7 @@ src/clearing_hub/
     ├── retry.py            미확인(PENDING) 거래 확인 태스크
     └── settlement.py       일일 정산 배치 (매일 00:05 KST 어제 정산 DRAFT, 설정 시 자동 확정, 시작 때 놓친 배치 catch-up)
 src/bank_sim/main.py        가짜 은행 (SPEC 4·9.4절 참고 구현, 계좌번호 끝자리로 성공·실패·지연·속임 재현, 허브 공개키 검증, 응답 서명)
-examples/README.md          참고 구현 목록 (Python bank_sim, SPEC 빠른 시작, Node.js는 준비 중)
+examples/README.md          참고 구현 목록 (Python bank_sim, SPEC 빠른 시작, Node.js examples/node-bank)
 tests/                      서명, 인증, 이체 성공·실패·멱등·타임아웃·재시도, 예치금·순채무한도·정산·대사 API,
                             시연 시나리오 전체 (test_demo_scenario.py = docs/DEMO.md), 부인방지 K1~K10 (test_nonrepudiation.py),
                             셀프 등록·기본 한도·/v1/me (test_onboarding.py), 서명 진단기 (test_signature_doctor.py), 연동 진단 API·401 hint (test_support.py)

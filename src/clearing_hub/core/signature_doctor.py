@@ -82,17 +82,18 @@ class DoctorContext:
 
 # ---- 가설 목록 (제목·SPEC 절·고치는 법) ----
 
-_REF_SIGN = "2.3의 `sign_request`"
+# PATH 가설의 fix에서 `{path}`는 허브가 검증한 실제 경로로 채운다 (_h의 path). 언어마다 함수 이름이 달라 "서명 함수"라고 쓴다
+_REF_SIGN = "서명 함수에 넘기는 PATH"
 CATALOG: dict[str, tuple[str, str, str]] = {
     # 은행 → 허브 요청 서명
     "PATH_WITHOUT_V1": ("서명 PATH에 `/v1`이 빠짐", "2.2",
-                        f"서명 PATH는 `/v1`부터 넣는다(`/v1/transfers`). {_REF_SIGN}에 넘기는 path를 확인"),
+                        f"서명 PATH는 `/v1`부터 넣는다(`{{path}}`). {_REF_SIGN}를 확인"),
     "PATH_FULL_URL": ("서명 PATH에 전체 URL(스킴·호스트)을 넣음", "2.2",
-                      f"`https://…`를 빼고 `/v1/…` 경로만 넣는다. {_REF_SIGN}의 path 인자"),
-    "PATH_WITH_QUERY": ("서명 PATH에 쿼리스트링을 넣음", "2.2", "쿼리 없이 경로만 넣는다 (규격 API는 쿼리를 쓰지 않는다)"),
-    "PATH_TRAILING_SLASH": ("서명 PATH 끝에 `/`를 붙임", "2.2", "끝의 `/` 없이 `/v1/transfers`처럼 넣는다"),
+                      f"`https://…`를 빼고 `{{path}}`처럼 경로만 넣는다. {_REF_SIGN}를 확인"),
+    "PATH_WITH_QUERY": ("서명 PATH에 쿼리스트링을 넣음", "2.2", "쿼리 없이 `{path}`처럼 경로만 넣는다 (규격 API는 쿼리를 쓰지 않는다)"),
+    "PATH_TRAILING_SLASH": ("서명 PATH 끝에 `/`를 붙임", "2.2", "끝의 `/` 없이 `{path}`처럼 넣는다"),
     "PATH_BANK_PREFIX": ("서명 PATH에 은행 쪽 경로 접두사가 들어감", "2.2",
-                         "은행 → 허브 PATH는 `/v1`부터다. 자기 base_url 경로(`/interbank` 등)를 붙이지 않는다"),
+                         "은행 → 허브 PATH는 `/v1`부터다(`{path}`). 자기 base_url 경로(`/interbank` 등)를 붙이지 않는다"),
     "BODY_DEFAULT_DUMPS": ("본문을 `json.dumps(obj)` 기본값으로 다시 만들어 서명함 (보낸 바이트와 다름)", "2.2",
                            "직렬화는 한 번만: `body = json.dumps(payload, ensure_ascii=False, separators=(\",\", \":\")).encode()`"
                            " → `sign_request(…, body)` → `content=body`로 전송 (`json=` 금지)"),
@@ -174,8 +175,10 @@ CATALOG: dict[str, tuple[str, str, str]] = {
 }
 
 
-def _h(code: str, detail: str, verified: bool = False) -> Hypothesis:
+def _h(code: str, detail: str, verified: bool = False, path: str | None = None) -> Hypothesis:
+    """`path`: 허브가 검증한 실제 PATH. PATH 가설의 fix에 예로 넣는다 (없으면 `/v1/transfers`)."""
     title, ref, fix = CATALOG[code]
+    fix = fix.replace("{path}", path or "/v1/transfers")
     return Hypothesis(code=code, title=title, detail=detail, spec_ref=ref, fix=fix, verified=verified)
 
 
@@ -410,7 +413,7 @@ def _invalid(failure, headers: dict, ctx: DoctorContext) -> list[Hypothesis]:
     choice, (key_code, fp, sig_code) = found
     (path_code, path), (body_code, _, how), (sep_code, *_), (method_code, _) = choice
     if path_code:
-        hyps.append(_h(path_code, f"허브는 `{failure.path}`로 검증했고, 서명은 `{path}`로 만들었다", True))
+        hyps.append(_h(path_code, f"허브는 `{failure.path}`로 검증했고, 서명은 `{path}`로 만들었다", True, path=failure.path))
     if body_code:
         hyps.append(_h(body_code, f"서명한 본문: {how}. 보낸 본문 {len(body)}바이트와 다르다", True))
     if sep_code:

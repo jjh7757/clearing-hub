@@ -73,6 +73,17 @@ def test_path_without_v1():
     assert "`/transfers`" in result.top.detail and result.top.spec_ref == "2.2"
 
 
+def test_path_fix_uses_failed_path():
+    """fix의 예는 실패한 실제 경로이고, 특정 언어의 함수 이름(`sign_request`)을 쓰지 않는다 (SPEC 1.2.2)."""
+    f = bank_failure(method="GET", path="/v1/banks", body=b"", signed_path="/banks")
+    fix = assert_top(f, "PATH_WITHOUT_V1").top.fix
+    assert "`/v1/banks`" in fix and "/v1/transfers" not in fix and "sign_request" not in fix
+    assert "서명 함수에 넘기는 PATH" in fix
+    f = bank_failure(method="GET", path="/v1/settlements", body=b"", signed_path="/v1/settlements/")
+    assert "`/v1/settlements`" in assert_top(f, "PATH_TRAILING_SLASH").top.fix
+    assert all("{path}" not in h.fix for h in diagnose(f, CTX).hypotheses)  # 자리 표시가 남지 않는다
+
+
 def test_path_full_url():
     assert_top(bank_failure(signed_path="https://clearing-hub.example.com/v1/transfers"), "PATH_FULL_URL")
 

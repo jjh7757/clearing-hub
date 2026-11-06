@@ -65,6 +65,17 @@ AvengersBank와 같은 공용 배포 서버에 올린다. 환경 구성·설계 
 - `monitor.sh`에 3줄 추가(백업 `monitor.sh.bak-*`), 실행 결과 `ok`
 - 걸린 것: 로컬(Windows, Docker Desktop)에는 arm64 에뮬레이션이 없어 이미지를 직접 빌드할 수 없다. 배포는 Actions로만 한다
 
+## 정산·Ed25519 배포 (2026-11-06)
+
+`feature/settlement`(1~11단계)를 `main`에 fast-forward 병합한 커밋 `da0e1f8`을 배포했다. 순서는 "Ed25519 필수화 배포 순서"와 "정산 배포 순서"를 합친 것이고, 서버 쪽은 `deploy/prepare-ed25519-keys.sh`(배포 전)·`deploy/after-deploy-8c.sh --settle`(배포 직후)로 했다.
+
+- 배포 전: 서버 안에서 허브 키·가짜 은행 키·AvengersBank 키 생성, `.env`·`sim.env`·AvengersBank `.env`에 기록(백업 `*.bak-20261106*`), HMAC 줄 삭제. 공개키·지문은 `/srv/clearing-hub/pubkeys.env`. 허브 지문 `37021b33778cec72`, 901 지문 `dd7ceee7877057e8`, 902 지문 `ed9d08addf00c1c3`
+- Actions 42183910566 성공(테스트 267개) → 두 컨테이너 `healthy`, 태그 = `da0e1f8`, 마이그레이션 `b7e3f1a9c2d4`(head), `/` → `"spec": "v1.2"`, `GET /v1/hub-key` 지문 일치
+- 배포 직후: 901·902 공개키 등록, 가짜 은행 재생성, 901·902 순채무한도 10억, 902 ping `ok:true`(응답 서명 확인)
+- 개시 정산 run 1(정산일 2026-11-05, 8건 12만 원): 901 −6만(`OVERDRAWN`, 한도 안), 902 +12만, `999` −6만(`OVERDUE` — 시험용 은행, 한도 0이라 송금만 막힘. 필요하면 비활성화)
+- AvengersBank: `feature/backend-api` push가 8d(`c7a9285`)를 먼저 배포했고(키 없이 타행 이체 꺼짐), 키를 넣은 `.env`로 `deploy-app avengers-bank c7a9285…` 재생성 → `keys ping` `ok: True`, `keys status` 지문 일치, 허브 쪽 901 ping `ok:true`(응답 서명 확인)
+- 걸린 것: AvengersBank 배포 트리거가 `feature/backend-api` push라, 허브보다 먼저 배포되어 둘 다 준비될 때까지 타행 이체가 약 20분 꺼져 있었다. 다음에 서명 체계를 바꿀 일이 있으면 허브 쪽 키 준비 → 허브 배포 → AvengersBank push 순서로 한다
+
 ## 확인
 
 ```bash

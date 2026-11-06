@@ -8,7 +8,7 @@ from clearing_hub.core.bank_client import bank_client
 from clearing_hub.core.database import get_db
 from clearing_hub.domains.banks import service
 from clearing_hub.domains.banks.models import Bank
-from clearing_hub.domains.banks.schemas import BankAdmin, BankCreate, BankCredentials, BankList, BankPublic
+from clearing_hub.domains.banks.schemas import BankAdmin, BankCreate, BankCredentials, BankList, BankPublic, BankUpdate
 
 router = APIRouter(prefix="/v1/banks", tags=["banks"])
 admin_router = APIRouter(prefix="/admin/banks", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -33,6 +33,14 @@ async def admin_register_bank(data: BankCreate, db: DB):
     async with db.begin():
         bank, api_key, secret = await service.register_bank(db, data)
     return BankCredentials(**BankAdmin.model_validate(bank, from_attributes=True).model_dump(), api_key=api_key, secret=secret)
+
+
+@admin_router.patch("/{bank_code}", response_model=BankAdmin)
+async def admin_update_bank(bank_code: str, data: BankUpdate, db: DB):
+    """이름·base_url 변경 (은행 주소가 바뀌었을 때). 바꾼 뒤 /ping으로 확인한다."""
+    async with db.begin():
+        bank = await service.update_bank(db, bank_code, data)
+    return BankAdmin.model_validate(bank, from_attributes=True)
 
 
 @admin_router.post("/{bank_code}/keys", response_model=BankCredentials)

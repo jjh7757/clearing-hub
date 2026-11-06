@@ -12,12 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clearing_hub.core.bank_client import BankClient, BankReply, bank_client
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.request_id import get_request_id
-from clearing_hub.core.exceptions import BadRequest, Forbidden, NotFound
+from clearing_hub.core.exceptions import ApiException, BadRequest, Forbidden, NotFound
 from clearing_hub.domains.accounts import service as account_service
 from clearing_hub.domains.banks import service as bank_service
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
-from clearing_hub.domains.transfers.schemas import TransferRequest
+from clearing_hub.domains.transfers.schemas import TransferRequest, TransferResolve
 
 logger = logging.getLogger(__name__)
 FINAL = {TransferStatus.COMPLETED, TransferStatus.FAILED}
@@ -117,37 +117,83 @@ async def _fill_holder_name(transfer: Transfer, receiver: Bank, client: BankClie
         transfer.holder_name = str(reply.body["holder_name"])[:50]
 
 
+async def _confirm_one(db: AsyncSession, transfer: Transfer, client: BankClient) -> bool:
+    """미확인 거래 하나를 받는 은행에 확인한다 (SPEC 4.3 → 404면 4.2 재전송). 확정됐으면 True.
+    확정되지 않으면 retry_count를 올리고, RETRY_MAX_COUNT에 닿으면 UNKNOWN으로 둔다."""
+    receiver = await db.get(Bank, transfer.to_bank)
+    sender = await db.get(Bank, transfer.from_bank)
+    if receiver is None or sender is None:
+        return False
+    status = await client.receive_status(receiver, transfer.transfer_id, transfer.request_id)
+    if status.ok and status.body.get("status") == "COMPLETED":
+        _apply_reply(db, transfer, status, no_answer_status=TransferStatus.PENDING)
+    elif status.status == 404:
+        # 은행이 그 ID로 입금한 적 없음 → /receive를 다시 보낸다 (은행 쪽 멱등 처리에 기댄다)
+        reply = await client.receive(receiver, _receive_payload(transfer, sender), transfer.request_id)
+        _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
+    else:
+        _set_status(db, transfer, TransferStatus.PENDING, f"확인 실패 (HTTP {status.status})")
+    logger.info("거래 재확인 %s → %s", transfer.transfer_id, transfer.status,
+                extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id, "bank_code": transfer.to_bank})
+    if transfer.status == TransferStatus.COMPLETED and not transfer.holder_name:
+        await _fill_holder_name(transfer, receiver, client)
+    if transfer.status in FINAL:
+        return True
+    transfer.retry_count += 1
+    if transfer.retry_count >= get_settings().retry_max_count:
+        _set_status(db, transfer, TransferStatus.UNKNOWN, f"{transfer.retry_count}회 확인 실패, 관리자 확인 필요")
+        logger.error("거래 %s 결과를 알 수 없음 (%s → %s)", transfer.transfer_id, transfer.from_bank, transfer.to_bank,
+                     extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id})
+    return False
+
+
 async def confirm_pending(db: AsyncSession, client: BankClient = bank_client) -> int:
     """미확인 거래(PENDING, 또는 호출 중 허브가 죽어 DELIVERING으로 남은 것)를 받는 은행에 확인한다.
     재시도 태스크와 관리 화면의 '다시 확인'이 부른다. 확정(COMPLETED/FAILED)된 건수를 돌려준다."""
-    settings = get_settings()
     stmt = select(Transfer).where(Transfer.status.in_([TransferStatus.PENDING, TransferStatus.DELIVERING]))
     confirmed = 0
     for transfer in (await db.scalars(stmt)).all():
-        receiver = await db.get(Bank, transfer.to_bank)
-        sender = await db.get(Bank, transfer.from_bank)
-        if receiver is None or sender is None:
-            continue
-        status = await client.receive_status(receiver, transfer.transfer_id, transfer.request_id)
-        if status.ok and status.body.get("status") == "COMPLETED":
-            _apply_reply(db, transfer, status, no_answer_status=TransferStatus.PENDING)
-        elif status.status == 404:
-            # 은행이 그 ID로 입금한 적 없음 → /receive를 다시 보낸다 (은행 쪽 멱등 처리에 기댄다)
-            reply = await client.receive(receiver, _receive_payload(transfer, sender), transfer.request_id)
-            _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
-        else:
-            _set_status(db, transfer, TransferStatus.PENDING, f"확인 실패 (HTTP {status.status})")
-        logger.info("거래 재확인 %s → %s", transfer.transfer_id, transfer.status,
-                    extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id, "bank_code": transfer.to_bank})
-        if transfer.status == TransferStatus.COMPLETED and not transfer.holder_name:
-            await _fill_holder_name(transfer, receiver, client)
-        if transfer.status in FINAL:
+        if await _confirm_one(db, transfer, client):
             confirmed += 1
-        else:
-            transfer.retry_count += 1
-            if transfer.retry_count >= settings.retry_max_count:
-                _set_status(db, transfer, TransferStatus.UNKNOWN, f"{transfer.retry_count}회 확인 실패, 관리자 확인 필요")
-                logger.error("거래 %s 결과를 알 수 없음 (%s → %s)", transfer.transfer_id, transfer.from_bank, transfer.to_bank,
-                             extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id})
     await db.commit()
     return confirmed
+
+
+async def _require_unknown(db: AsyncSession, transfer_id: str) -> Transfer:
+    transfer = await db.get(Transfer, transfer_id)
+    if transfer is None:
+        raise NotFound("TRANSFER_NOT_FOUND", "거래를 찾을 수 없습니다", transfer_id)
+    if transfer.status != TransferStatus.UNKNOWN:
+        # PENDING·DELIVERING은 재시도 태스크가 아직 확인 중이고, COMPLETED·FAILED는 이미 확정됐다
+        raise ApiException(409, "TRANSFER_NOT_UNKNOWN", f"UNKNOWN 상태인 거래만 정리할 수 있습니다 (지금 {transfer.status})",
+                           transfer_id)
+    return transfer
+
+
+async def recheck_unknown(db: AsyncSession, transfer_id: str, client: BankClient = bank_client) -> Transfer:
+    """UNKNOWN 거래를 자동 확인으로 되돌린다: 재시도 횟수를 0으로 하고 지금 한 번 확인한다.
+    받는 은행 장애가 풀린 뒤에 쓴다. 이번에도 확정되지 않으면 PENDING으로 남아 재시도 태스크가 이어서 확인한다."""
+    transfer = await _require_unknown(db, transfer_id)
+    transfer.retry_count = 0
+    _set_status(db, transfer, TransferStatus.PENDING, "관리자 재확인 요청")
+    await _confirm_one(db, transfer, client)
+    await db.commit()
+    return transfer
+
+
+async def resolve_unknown(db: AsyncSession, transfer_id: str, data: TransferResolve) -> Transfer:
+    """UNKNOWN 거래를 관리자가 받는 은행과 직접 확인한 결과로 확정한다 (SPEC 3.4).
+
+    FAILED로 정하면 보내는 은행이 출금을 되돌리므로, 받는 은행에 입금이 **없다는 것**을 확인한 뒤에만 쓴다.
+    보내는 은행에는 fail_code RECEIVER_ERROR와 고정 설명만 보이고, 관리자가 쓴 사유는 이력에만 남는다."""
+    transfer = await _require_unknown(db, transfer_id)
+    if data.status == TransferStatus.COMPLETED:
+        transfer.holder_name = data.holder_name or transfer.holder_name
+    else:
+        transfer.fail_code = "RECEIVER_ERROR"
+        transfer.fail_message = "허브 관리자가 받는 은행과 확인한 결과 입금되지 않았습니다"
+    _set_status(db, transfer, TransferStatus(data.status), f"관리자 정리: {data.reason}"[:300])
+    logger.warning("거래 %s 관리자 정리 → %s (%s)", transfer.transfer_id, transfer.status, data.reason,
+                   extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id})
+    await db.commit()
+    return transfer

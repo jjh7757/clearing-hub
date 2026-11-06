@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clearing_hub.core.exceptions import ApiException, BadRequest, NotFound
 from clearing_hub.core.signing import hash_api_key, new_api_key, new_secret
 from clearing_hub.domains.banks.models import Bank
-from clearing_hub.domains.banks.schemas import BankCreate
+from clearing_hub.domains.banks.schemas import BankCreate, BankUpdate
 
 
 async def get_bank(db: AsyncSession, bank_code: str) -> Bank | None:
@@ -42,10 +42,26 @@ async def register_bank(db: AsyncSession, data: BankCreate) -> tuple[Bank, str, 
     return bank, api_key, secret
 
 
-async def rotate_keys(db: AsyncSession, bank_code: str) -> tuple[Bank, str, str]:
+async def _require_bank(db: AsyncSession, bank_code: str) -> Bank:
     bank = await get_bank(db, bank_code)
     if bank is None:
         raise NotFound("BANK_NOT_FOUND", f"은행 코드 {bank_code}를 찾을 수 없습니다")
+    return bank
+
+
+async def update_bank(db: AsyncSession, bank_code: str, data: BankUpdate) -> Bank:
+    """이름·base_url 변경. 진행 중인 재시도도 다음 호출부터 새 주소로 간다 (거래에는 주소를 저장하지 않는다)."""
+    bank = await _require_bank(db, bank_code)
+    if data.name is not None:
+        bank.name = data.name
+    if data.base_url is not None:
+        bank.base_url = str(data.base_url).rstrip("/")
+    await db.flush()
+    return bank
+
+
+async def rotate_keys(db: AsyncSession, bank_code: str) -> tuple[Bank, str, str]:
+    bank = await _require_bank(db, bank_code)
     api_key, secret = new_api_key(), new_secret()
     bank.api_key_hash, bank.hmac_secret = hash_api_key(api_key), secret
     await db.flush()
@@ -53,9 +69,7 @@ async def rotate_keys(db: AsyncSession, bank_code: str) -> tuple[Bank, str, str]
 
 
 async def set_active(db: AsyncSession, bank_code: str, active: bool) -> Bank:
-    bank = await get_bank(db, bank_code)
-    if bank is None:
-        raise NotFound("BANK_NOT_FOUND", f"은행 코드 {bank_code}를 찾을 수 없습니다")
+    bank = await _require_bank(db, bank_code)
     bank.active = active
     await db.flush()
     return bank

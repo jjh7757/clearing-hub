@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 BANK_CODE = Field(pattern=r"^\d{3}$", description="은행 코드 3자리")
 
@@ -18,6 +18,19 @@ class BankCreate(BaseModel):
     bank_code: str = BANK_CODE
     name: str = Field(min_length=1, max_length=50)
     base_url: HttpUrl = Field(description="은행의 /interbank 주소")
+
+
+class BankUpdate(BaseModel):
+    """은행 정보 변경. 넣은 필드만 바꾼다. 은행 코드·키는 바꾸지 않는다 (키는 /keys)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=50)
+    base_url: HttpUrl | None = Field(default=None, description="은행의 /interbank 주소")
+
+    @model_validator(mode="after")
+    def something_to_change(self) -> "BankUpdate":
+        if self.name is None and self.base_url is None:
+            raise ValueError("name과 base_url 중 하나 이상을 넣어야 합니다")
+        return self
 
 
 class BankAdmin(BankPublic):

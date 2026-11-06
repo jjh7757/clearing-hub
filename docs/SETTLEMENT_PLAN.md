@@ -1,0 +1,328 @@
+# ClearingHub 정산 구현 계획서 — 상계·대사·예치금 결제
+
+- 작성일: 2026-11-06
+- 상태: 초안. [PROJECT_PLAN.md](PROJECT_PLAN.md) 3.3절("정산은 표시만")과 [SPEC.md](SPEC.md) 8절 8번("정산 시각·방식, 미구현")을 이 문서로 대체한다
+- 범위: 실제 금융망의 이체 13단계 가운데 허브에 아직 없는 **8~13단계**(마감 상계 → 대사 → 중앙은행 정산 → 은행 장부 정리)를 ClearingHub와 AvengersBank에 구현한다
+- 전제: 서버는 하나(ClearingHub)지만 **장부는 둘**로 분리한다. 거래 기록(`transfers`)과 예치금 원장(`reserve_*`)은 서로 다른 도메인이 관리하고, 둘 사이는 "정산 지시서"로만 이어진다. 나중에 예치금 원장을 별도 서버(중앙은행 역할)로 떼어 내도 허브 쪽 코드는 그대로 두는 것이 목표다
+
+---
+
+## 1. 왜 하는가
+
+지금 허브는 금융결제원의 **중계** 역할(전문 전달·기록·재시도)까지만 구현돼 있다. 그래서 다음 문제가 남아 있다.
+
+| 문제 | 지금 | 이 계획 뒤 |
+|---|---|---|
+| 받는 은행이 준 외상이 영원히 갚아지지 않는다 | 입금은 즉시, 은행 간 돈은 움직이지 않음 | 매일 차액을 **예치금 원장**에서 옮긴다 (11~12단계) |
+| 보내는 은행이 출금 없이 보내도 허브가 모른다 | 막을 방법 없음 | 보낸 만큼 그 은행 예치금이 줄어든다. 예치금+한도를 넘으면 접수 거절 (순채무한도) |
+| 은행이 자기 장부를 고쳐도 드러나지 않는다 | 비교할 자료가 없음 | 허브가 은행마다 **대사 파일**을 주고, 은행이 자기 장부와 맞춰 본다 (10단계) |
+| 은행이 파산하거나 정산 때 돈을 못 내면 | 정해진 것 없음 | 한도만큼은 마이너스를 허용하고, 넘으면 그 은행의 송금을 자동으로 막는다 |
+
+한 줄로: **"줬다"는 말이 아니라 예치금 원장의 숫자가 이체의 증거가 되게 한다.**
+
+---
+
+## 2. 설계 결정
+
+| # | 항목 | 결정 | 이유 |
+|---|---|---|---|
+| 1 | 중계와 정산의 위치 | 한 서버, 다른 도메인(`settlement`, `reserve`). `reserve`는 `transfers`를 직접 읽지 않고 정산 지시서만 받는다 | 부트캠프 규모. 분리 배포 가능성은 인터페이스로 남긴다 |
+| 2 | 정산 단위 | **다자간 차액**. 은행마다 `받을 돈 − 줄 돈` 하나를 계산한다 (합은 항상 0). 은행 쌍별 표는 화면용으로만 따로 만든다 | 실제 소액결제망 방식. 예치금 이동 횟수가 은행 수만큼으로 줄어든다 |
+| 3 | 정산일과 마감 | 정산일은 KST 날짜. 마감은 **다음 날 00:05 KST**. 대상은 `status = COMPLETED`이고 **아직 정산되지 않은** 거래 전부 (`finished_at < 마감`) | 날짜 범위가 아니라 "미정산" 기준이라, `UNKNOWN`이었다가 며칠 뒤 `COMPLETED`로 바뀐 거래도 빠지지 않는다 |
+| 4 | 정산 흐름 | `DRAFT`(계산만) → `SETTLED`(예치금 반영). 관리자가 확정하거나 설정으로 자동 확정 | 대사 뒤 확정이 실제 절차. 시연에서는 자동 확정으로 바로 보여 줄 수 있다 |
+| 5 | 예치금(당좌예금) | 은행마다 `reserve_accounts` 한 행. 입금·출금은 관리자 API로만(실제 돈 이동은 범위 밖). 모든 변동은 `reserve_ledger`에 분개로 남긴다 | 한국은행 당좌계정 역할. 잔액 컬럼은 정산·입출금 때만 바뀌므로 행 잠금으로 충분하다 |
+| 6 | 순채무한도 | `banks.net_debit_cap`(원, 기본 0). 접수 때 `미정산 순채무 + amount ≤ 예치금 + 한도`가 아니면 `LIMIT_EXCEEDED`(400, `status: FAILED`) | 담보·일중당좌대출 역할. 새 오류 코드를 만들지 않고 SPEC 5절의 `LIMIT_EXCEEDED`를 쓴다 |
+| 7 | 정산 때 예치금 부족 | 한도 안이면 마이너스를 허용하고 포지션을 `OVERDRAWN`으로 표시. 넘으면 그래도 반영하되 `OVERDUE`로 표시한다. 그 은행은 6번 검사에 걸려 **송금이 자동으로 막히고**, 받기만 된다 | 손실분담·담보처분은 범위 밖. 관리자가 예치금을 넣으면 풀린다 |
+| 8 | 정산된 거래는 바꾸지 않는다 | `transfers.settlement_run_id`가 채워진 거래는 상태 변경 금지. 정정은 `reserve_ledger`의 `ADJUST` 분개로만 | 결제완결성. 지금도 `UNKNOWN`만 관리자가 바꿀 수 있고 `UNKNOWN`은 정산 대상이 아니라 충돌이 없다 |
+| 9 | 대사 파일 | 은행이 `GET /v1/settlements/{date}`로 **자기 몫만** 받는다 (포지션 + 거래 목록). 허브가 은행을 부르지 않는다 | 은행 쪽 API를 늘리지 않는다 (SPEC 4절 변경 없음). 가짜 은행 `902`도 그대로 |
+| 10 | 은행 장부 정리(13단계) | AvengersBank가 매일 대사 파일을 받아 `INTERBANK_SETTLEMENT` 계정과 비교하고, 맞으면 `HUB_RESERVE` 계정으로 옮긴다 | 가짜 은행은 장부가 없으므로 AvengersBank만 구현 |
+
+---
+
+## 3. 13단계 → 구현 대응표
+
+| 단계 | 실제 금융망 | 구현 위치 | 상태 |
+|---|---|---|---|
+| 1~7 | 수취조회·출금·입금 의뢰·입금·기록 | `transfers`, `inquiry`, `bank_client`, `workers/retry.py` | 있음 |
+| 8 | 하루치 거래 수집 | `settlement/service.py: collect()` — 미정산 `COMPLETED` 거래를 모아 `settlement_run_id`를 찍는다 | 이 계획 |
+| 9 | 다자간 차액 계산 | `settlement/service.py: compute_positions()` → `settlement_positions`, `settlement_pairs` | 이 계획 |
+| 10 | 대사 파일 전달 | `GET /v1/settlements/{date}` (은행용), `GET /admin/settlements/{id}/transfers.csv` | 이 계획 |
+| 11 | 결제 지시 | `settlement/service.py: confirm()` → `reserve.service.apply_instruction(instruction)` | 이 계획 |
+| 12 | 중앙은행 원장 반영 | `reserve/service.py` — `reserve_accounts.balance` 갱신 + `reserve_ledger` 분개 (한 트랜잭션) | 이 계획 |
+| 13 | 은행 장부 정리 | AvengersBank `interbank/settlement_sync.py` — 대사 → `SETTLE` 분개 | 이 계획 |
+| (사전) | 당좌예금 예치, 순채무한도 | `reserve` 도메인, `banks.net_debit_cap`, `transfers.service.accept_and_deliver()` 검사 | 이 계획 |
+
+---
+
+## 4. 데이터 모델
+
+### 4.1 허브 — 새 테이블
+
+```
+settlement_runs            정산 1회 (하루 1개)
+  run_id          PK (int)
+  settle_date     date, UNIQUE              # KST 기준 날짜
+  cutoff_at       timestamptz               # 이 시각 전에 COMPLETED 된 거래까지
+  status          DRAFT | SETTLED
+  tx_count, total_amount
+  created_at, settled_at, settled_by (관리자 / "auto")
+
+settlement_positions       은행별 순 포지션 (9단계 결과, 11단계 지시서)
+  run_id FK, bank_code FK  → PK (run_id, bank_code)
+  sent_count, sent_total   # 이 은행이 보낸 것 (줄 돈)
+  recv_count, recv_total   # 이 은행이 받은 것 (받을 돈)
+  net_amount               # recv_total − sent_total. 양수면 받음, 음수면 냄
+  result                   NULL | OK | OVERDRAWN | OVERDUE   (12단계 뒤 채움)
+  balance_after            # 반영 뒤 예치금 잔액
+
+settlement_pairs           은행 쌍별 표 (화면·CSV용. 계산에는 안 쓴다)
+  run_id FK, bank_a, bank_b (bank_a < bank_b) → PK
+  a_to_b_count, a_to_b_total, b_to_a_count, b_to_a_total, net_amount, net_direction
+
+reserve_accounts           은행별 예치금 (당좌예금)
+  bank_code PK FK
+  balance        bigint, 기본 0  (마이너스 가능, 2절 7번)
+  updated_at
+
+reserve_ledger             예치금 분개 (모든 변동의 근거)
+  entry_id PK
+  bank_code FK
+  kind           DEPOSIT | WITHDRAW | SETTLE_CREDIT | SETTLE_DEBIT | ADJUST
+  amount         잔액 증감 (SETTLE_DEBIT·WITHDRAW는 음수)
+  run_id         FK nullable (SETTLE_* 만)
+  memo, created_by, created_at
+  UNIQUE (run_id, bank_code, kind)         # 같은 정산을 두 번 반영하지 못하게
+```
+
+### 4.2 허브 — 기존 테이블 변경
+
+| 테이블 | 변경 |
+|---|---|
+| `transfers` | `settlement_run_id` (FK nullable, index). 채워지면 정산됨. 인덱스 `(from_bank, settlement_run_id)`, `(to_bank, settlement_run_id)` — 순채무 계산용 |
+| `banks` | `net_debit_cap` (bigint, 기본 0) |
+
+### 4.3 AvengersBank — 변경
+
+| 항목 | 변경 |
+|---|---|
+| `LedgerAccount` | `HUB_RESERVE = "HUB_RESERVE"` 추가: 우리가 허브에 맡긴 예치금 |
+| `LedgerEvent` | `SETTLE = "SETTLE"` 추가: 정산 계정 → 예치금 계정 |
+| `interbank_ledger` | `settle_date` (date nullable, index) 추가: 어느 날 정산에서 맞춰졌는지. NULL이면 미정산 |
+| 새 테이블 `settlement_reconciliations` | `settle_date` PK, `hub_run_id`, `hub_net_amount`, `our_net_amount`, `result` (`MATCHED` / `MISMATCH` / `HUB_UNAVAILABLE`), `diff_json`(안 맞는 `transfer_id` 목록), `checked_at` |
+
+### 4.4 순채무(exposure) 계산
+
+접수 시점에 보내는 은행 `B`에 대해:
+
+```
+sent_open = Σ amount  where from_bank = B and settlement_run_id IS NULL
+                        and status in (ACCEPTED, DELIVERING, PENDING, UNKNOWN, COMPLETED)
+recv_open = Σ amount  where to_bank = B   and settlement_run_id IS NULL and status = COMPLETED
+exposure  = sent_open − recv_open
+허용      = exposure + amount ≤ reserve_accounts.balance + banks.net_debit_cap
+```
+
+- 진행 중(`PENDING`·`UNKNOWN`) 거래도 "나갈 수 있는 돈"이므로 `sent_open`에 넣는다. `FAILED`는 뺀다.
+- 받는 쪽은 `COMPLETED`만 센다. 아직 안 들어온 돈으로 보내게 하지 않기 위해서다.
+- 두 합계 쿼리는 인덱스를 타고, 접수마다 한 번 돈다. 거래가 많아지면 `reserve_accounts`에 캐시 컬럼을 두는 것으로 바꾼다 (지금은 안 한다).
+
+---
+
+## 5. 처리 흐름
+
+### 5.1 정산 배치 (8~12단계)
+
+```
+workers/settlement.py  매일 00:05 KST (또는 POST /admin/settlements/run)
+ │
+ ├ 8.  collect(settle_date)        [트랜잭션 1]
+ │      settlement_runs 생성 (DRAFT, cutoff_at = 정산일 다음 날 00:00 KST)
+ │      UPDATE transfers SET settlement_run_id = run WHERE status='COMPLETED'
+ │             AND settlement_run_id IS NULL AND finished_at < cutoff_at
+ │      → 같은 날짜가 이미 있으면 409 SETTLEMENT_EXISTS
+ │
+ ├ 9.  compute_positions(run)      [같은 트랜잭션]
+ │      은행별 sent/recv 합계 → settlement_positions
+ │      은행 쌍별 합계          → settlement_pairs
+ │      검증: Σ net_amount == 0 이 아니면 롤백·오류 (계산 버그 방어)
+ │
+ ├ 10. (대사 기간) 은행이 GET /v1/settlements/{date}로 자기 몫을 받아 맞춰 본다
+ │      SETTLEMENT_AUTO_CONFIRM=true 면 이 단계를 건너뛰고 바로 11로
+ │
+ ├ 11. confirm(run)                [트랜잭션 2]
+ │      run.status가 DRAFT인지 SELECT ... FOR UPDATE 로 확인 (두 번 확정 방지)
+ │      instruction = [(bank_code, net_amount) ...]  ← positions에서 만든다
+ │      reserve.apply_instruction(run_id, instruction)   ← reserve 도메인은 이것만 받는다
+ │
+ └ 12. reserve.apply_instruction   [같은 트랜잭션]
+        은행마다: reserve_accounts 행 잠금 → balance += net_amount
+                  reserve_ledger에 SETTLE_CREDIT / SETTLE_DEBIT 분개
+                  result = OK / OVERDRAWN(balance < 0) / OVERDUE(balance < −cap)
+        run.status = SETTLED, settled_at
+        OVERDUE 은행이 있으면 logger.error (관리자 알림)
+```
+
+`reserve.apply_instruction()`의 입력은 `(run_id, [(bank_code, amount)])`뿐이다. 이 함수를 HTTP 호출로 바꾸면 예치금 원장을 별도 서버로 뗄 수 있다 (2절 1번).
+
+### 5.2 접수 때 순채무한도 검사
+
+`transfers.service.accept_and_deliver()`에서 `LIMIT_EXCEEDED`(1회 상한) 검사 바로 뒤에 4.4의 검사를 넣는다. 거절 메시지: `"순채무한도를 넘었습니다 (예치금 X원 + 한도 Y원, 미정산 순채무 Z원)"`. 접수 전 거절이므로 SPEC 3.3의 규칙대로 `status: "FAILED"`가 붙고, 보내는 은행은 출금을 되돌린다.
+
+### 5.3 은행 쪽 대사·장부 정리 (13단계, AvengersBank)
+
+```
+interbank/settlement_sync.py   매일 00:30 KST (허브 배치 뒤)
+ 1. GET /v1/settlements/{어제}  (서명, SPEC 2절)
+    - 404 → 허브가 아직 안 돌렸음. 1시간 뒤 다시 (최대 24회)
+    - DRAFT → 대사만 하고 SETTLE 분개는 하지 않음. SETTLED가 될 때까지 다시 확인
+ 2. 우리 장부 계산: 허브가 준 transfer_id 목록을 **기준**으로 interbank_ledger에서
+    아직 정산 표시가 없는 COMPLETE(+)·RECEIVE(−) 분개를 찾아 은행별로 합산
+    (날짜로 자르지 않는다. 허브가 "미정산" 기준이라 며칠 전 거래가 들어올 수 있다)
+    → our_net_amount. 부호는 허브 규칙(받을 돈 − 줄 돈)으로 바꾼다.
+      INTERBANK_SETTLEMENT 계정은 "+ 줄 돈 / − 받을 돈"이므로 our_net = −(분개 합)
+    추가로 우리 장부에 정산 표시가 없는데 허브 목록에 없는 COMPLETE·RECEIVE 분개도 찾는다
+ 3. 비교
+    - 포지션 합계가 같고, transfer_id 집합도 같음 → MATCHED
+    - 허브 목록의 ID가 우리 interbank_transfers에서 아직 PENDING이면 → 불일치가 아니라
+      "확인 중". 그 거래가 확정될 때까지 1시간 뒤 다시 (허브 202 뒤 결과 조회가 늦은 경우)
+    - 그 밖에 다르면 MISMATCH + diff_json(허브에만 있는 ID / 우리에게만 있는 ID / 금액 다른 ID)
+      logger.error, 자동 처리 중단, 관리자 확인
+ 4. MATCHED이고 허브가 SETTLED이면 [트랜잭션]
+    은행별 SETTLE 분개: INTERBANK_SETTLEMENT −net, HUB_RESERVE +net
+    (transfer_id 대신 "settle:{date}:{bank}"를 키로 써서 두 번 기록 못 하게)
+    맞춘 COMPLETE·RECEIVE 분개에 settle_date를 표시해 다음 대사에서 다시 세지 않게 한다
+    (interbank_ledger에 settle_date 컬럼 추가, 4.3절)
+ 5. settlement_reconciliations에 결과 저장
+```
+
+MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `COMPLETED`라고 답했거나(허브에만 있음), 보내는 은행이 출금 없이 보냈거나(우리 장부에 DEBIT 없음) 하면 여기서 드러난다.
+
+---
+
+## 6. API
+
+### 6.1 은행용 (SPEC에 추가, v0.6)
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET | `/v1/settlements` | 최근 30일 정산 목록: `settle_date`, `status`, 내 `net_amount`, `result` |
+| GET | `/v1/settlements/{settle_date}` | **대사 파일.** 내 포지션(`sent_*`, `recv_*`, `net_amount`, `result`, `balance_after`) + 내가 보내거나 받은 거래 목록(`transfer_id`, 방향, 상대 은행, `amount`, `finished_at`). 없으면 404 `SETTLEMENT_NOT_FOUND` |
+| GET | `/v1/reserve` | 내 예치금: `balance`, `net_debit_cap`, `exposure`(4.4), `available = balance + cap − exposure` |
+
+모두 2절 인증, 자기 은행 것만 본다. 다른 은행의 포지션·잔액은 보여 주지 않는다.
+
+### 6.2 관리자용
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| POST | `/admin/settlements/run` | `{settle_date}` 정산 DRAFT 생성 (8·9단계). 이미 있으면 409 |
+| GET | `/admin/settlements` | 목록 |
+| GET | `/admin/settlements/{run_id}` | 포지션 전체 + 쌍별 표 |
+| GET | `/admin/settlements/{run_id}/transfers.csv` | 거래 목록 CSV |
+| POST | `/admin/settlements/{run_id}/confirm` | 확정 (11·12단계). `{"reason": ...}` |
+| GET | `/admin/reserve` | 은행별 예치금·한도·exposure |
+| POST | `/admin/reserve/{bank_code}/deposit` | `{amount, memo}` 예치 (DEPOSIT 분개) |
+| POST | `/admin/reserve/{bank_code}/withdraw` | `{amount, memo}` 인출. `balance − amount < −cap` 이면 거절 |
+| POST | `/admin/reserve/{bank_code}/adjust` | `{amount, memo}` 정정 분개 (양수·음수). 사유 필수 |
+| GET | `/admin/reserve/{bank_code}/ledger` | 분개 목록 |
+| PATCH | `/admin/banks/{bank_code}` | 기존 API에 `net_debit_cap` 필드 추가 |
+
+### 6.3 SPEC 변경 (v0.6)
+
+- 1절 상한 설명에 순채무한도 한 줄 추가 (`LIMIT_EXCEEDED`, `message`로 구분)
+- 새 절 **10. 정산**: 2절의 결정 3·4·6·7, 6.1의 API, 대사 파일 형식, 은행이 할 일(매일 대사, 맞지 않으면 허브 관리자에게 알림)
+- 5절 표에 `SETTLEMENT_NOT_FOUND`(404), `SETTLEMENT_EXISTS`(409, 관리자용) 추가
+- 8절 8번을 "확정"으로 바꾸고 이 문서를 가리킨다
+- 4절(허브 → 은행)은 **바꾸지 않는다**. 이미 연동한 은행은 아무것도 고치지 않아도 이체가 그대로 된다. 단 예치금이 0이고 한도가 0이면 송금이 막히므로, 배포 전에 관리자가 참가 은행마다 예치금 또는 한도를 넣어 둔다 (7절 배포 순서)
+
+---
+
+## 7. 작업 단계와 일정
+
+1인 기준 약 **10일**. 각 단계 끝에 테스트가 통과해야 다음으로 간다.
+
+| 단계 | 소요 | 산출물 | 완료 기준 |
+|---|---|---|---|
+| 0. 규격·설정 | 0.5일 | SPEC v0.6 초안(6.3), `config.py`에 `settlement_cutoff_time`(기본 `00:05`), `settlement_timezone`(`Asia/Seoul`), `settlement_auto_confirm`(기본 `false`) | 팀 합의 |
+| 1. 예치금 원장 | 2일 | `domains/reserve/` (models·schemas·service·router), Alembic `reserve_accounts`·`reserve_ledger`·`banks.net_debit_cap`, 관리자 입출금·정정 API, `GET /v1/reserve` | 입금·인출·정정이 분개와 잔액에 같이 남고, 인출 한도 검사가 된다 |
+| 2. 순채무한도 검사 | 1일 | `transfers/service.py` 4.4 검사, 은행 등록 시 `reserve_accounts` 행 자동 생성 | 예치금 0·한도 0인 은행의 이체가 `LIMIT_EXCEEDED FAILED`로 거절되고, 예치금을 넣으면 된다. 기존 테스트는 conftest에서 한도를 넉넉히 줘 그대로 통과 |
+| 3. 정산 배치 (DRAFT) | 2일 | `domains/settlement/` models·service(`collect`·`compute_positions`), Alembic `settlement_*`·`transfers.settlement_run_id`, `POST /admin/settlements/run`, 조회 API, CSV | 손으로 계산한 하루치 상계와 같다. `Σ net = 0`. 같은 날짜 두 번 돌리면 409. 늦게 COMPLETED된 거래가 다음 정산에 들어간다 |
+| 4. 확정·예치금 반영 | 1.5일 | `confirm()` → `reserve.apply_instruction()`, `workers/settlement.py`(매일 자동 DRAFT, 설정 시 자동 확정), `OVERDRAWN`·`OVERDUE` 처리 | 확정 뒤 잔액이 포지션만큼 바뀌고 분개가 남는다. 두 번 확정 불가. `OVERDUE` 은행은 송금이 막히고 받기는 된다 |
+| 5. 은행용 대사 API | 1일 | `GET /v1/settlements`, `/v1/settlements/{date}` | 은행이 자기 거래만 본다. 다른 은행 포지션은 안 보인다 |
+| 6. AvengersBank 대사·정리 | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `settlement_reconciliations`, `settlement_sync.py` 워커, `hub_client.get_settlement()`, 관리자 조회 API 1개 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록을 일부러 하나 지우면 `MISMATCH`와 diff가 나온다 |
+| 7. 시연·문서 | 1일 | README·DEPLOY 갱신, 시연 대본(8절), 가짜 은행 `902` 예치금 시드 | 8절 시나리오가 끝까지 돈다 |
+
+**우선순위**: 기간이 줄면 6 → 5 → 4의 자동 워커 순으로 뺀다. 1·2·3(예치금, 한도, 상계 계산)은 유지한다. 이 셋만 있어도 "보낸 만큼 예치금이 줄고, 하루치 차액이 계산된다"를 보여 줄 수 있다.
+
+**브랜치**: 허브는 `feature/settlement`, AvengersBank는 기존 `feature/backend-api`에서 이어서 한다 (main 병합·PR은 하지 않는다).
+
+---
+
+## 8. 테스트 목록
+
+허브 `tests/test_settlement.py`, `tests/test_reserve.py`:
+
+| 번호 | 시험 | 기대 |
+|---|---|---|
+| R1 | 예치 100만 → 인출 30만 → 잔액 70만, 분개 2건 | 잔액·분개 일치 |
+| R2 | 한도 0, 잔액 10만에서 20만 인출 | 거절 |
+| R3 | 같은 `run_id`로 `apply_instruction` 두 번 | 두 번째는 유니크 제약으로 실패, 잔액 한 번만 변함 |
+| N1 | 예치 0·한도 0인 은행이 이체 | `LIMIT_EXCEEDED`, `status: FAILED`, 허브에 거래 없음 |
+| N2 | 예치 10만, 5만 이체 2건 → 3번째 5만 | 3번째 거절 (PENDING도 exposure에 포함) |
+| N3 | 받은 COMPLETED 10만이 있으면 그만큼 더 보낼 수 있다 | 허용 |
+| S1 | 901→902 5만 2건, 902→901 3만 1건 → DRAFT | 901 net −7만, 902 net +7만, 쌍 표 1행, Σ=0 |
+| S2 | `FAILED`·`PENDING`·`UNKNOWN` 거래는 빠진다 | tx_count에 없음 |
+| S3 | 마감 뒤 COMPLETED 된 거래는 다음 날 정산에 들어간다 | 첫 run에 없고 두 번째 run에 있음 |
+| S4 | 같은 날짜 두 번 run | 409 |
+| S5 | 확정 → 잔액·분개·`result` | 901 잔액 −7만, 902 +7만, SETTLE_DEBIT/CREDIT |
+| S6 | 확정 두 번 | 409, 잔액 그대로 |
+| S7 | 잔액 5만·한도 0인 은행이 net −7만 | `OVERDUE`, 그다음 이체가 `LIMIT_EXCEEDED`, 받기는 됨 |
+| S8 | 은행 API로 다른 은행 포지션 요청 | 자기 것만 나옴 |
+| S9 | 정산된 거래에 `resolve_unknown` | 불가 (UNKNOWN이 아니므로 기존 409) |
+
+AvengersBank `tests/test_settlement_sync.py`:
+
+| 번호 | 시험 | 기대 |
+|---|---|---|
+| B1 | 가짜 허브 응답 = 우리 장부 | `MATCHED`, `SETTLE` 분개 생성, 정산 계정 잔액 0 |
+| B2 | 같은 날짜 두 번 돌림 | 분개 한 번만 |
+| B3 | 허브 목록에 우리에게 없는 `transfer_id` | `MISMATCH`, diff에 그 ID, 분개 없음 |
+| B4 | 허브 DRAFT | 대사 기록만, 분개 없음 |
+| B5 | 허브 404 | `HUB_UNAVAILABLE`, 다음 주기에 다시 |
+
+---
+
+## 9. 시연 시나리오
+
+1. **예치**: 관리자가 `901`(AvengersBank)에 100만 원, `902`(SimBank)에 100만 원 예치. `/admin/reserve`에서 잔액 확인
+2. **한도 검사**: `903`(예치 0)을 등록해 이체 → `LIMIT_EXCEEDED` "순채무한도를 넘었습니다". 예치 뒤 성공
+3. **하루치 거래**: 모아에게 "SimBank 110-123-0001로 5만 원" 2번, 관리자가 `902`에서 `901`로 3만 원 1번 (가짜 은행은 보내지 못하므로 허브 API로 직접)
+4. **마감 상계**: `POST /admin/settlements/run` → 포지션 표: 901 −7만, 902 +7만. 쌍별 표. CSV
+5. **대사**: AvengersBank 관리 API에서 `settlement_reconciliations` 조회 → `MATCHED`
+6. **확정**: `confirm` → `/admin/reserve`에서 901 93만, 902 107만. 분개 2건
+7. **은행 장부 정리**: AvengersBank 워커 실행 → `INTERBANK_SETTLEMENT` 0, `HUB_RESERVE` −7만 (허브 예치금이 그만큼 줄었음)
+8. **속이는 은행**: 허브 DB에서 거래 하나를 지우고(또는 가짜 은행이 입금 없이 200을 주는 계좌 `0006`을 추가해) 다시 대사 → `MISMATCH`와 문제 `transfer_id`가 나온다. "데이터로만 주고받는데 어떻게 아느냐"에 대한 답이 이 화면이다
+
+---
+
+## 10. 리스크
+
+| 리스크 | 대응 |
+|---|---|
+| 접수마다 exposure 합계 쿼리 2개가 돈다 | 인덱스 `(from_bank, settlement_run_id)`·`(to_bank, settlement_run_id)`. 미정산 거래는 하루치뿐이라 작다. 부족하면 캐시 컬럼 |
+| 배치가 도는 중에 거래가 COMPLETED 됨 | `finished_at < cutoff_at`로 자르고, 늦은 것은 다음 날 (2절 3번). `collect`의 UPDATE 한 문장으로 경쟁을 없앤다 |
+| 허브와 은행의 날짜 경계가 다름 | 둘 다 KST, 허브 `finished_at` 기준. 은행은 허브가 준 목록을 **기준**으로 삼고 자기 장부에서 그 ID를 찾는다 (날짜로 자르지 않는다) |
+| 허브 재시작 중 배치가 안 돎 | 워커 시작 때 "어제 run이 없으면 지금 만든다". 관리자 수동 실행도 있다 |
+| 예치금을 실제 돈으로 오해 | 화면·문서에 "모의 예치금"이라고 적는다. 입출금은 관리자 API뿐이다 |
+| 기존 참가 은행이 갑자기 막힘 | 배포 직후 관리자가 은행마다 예치금 또는 한도를 넣는다. 배포 순서를 DEPLOY.md에 적는다 |
+| 정산된 거래를 고쳐야 할 때 | 거래는 안 고친다. `ADJUST` 분개 + 사유. 다음 정산에는 영향 없음 |
+
+---
+
+## 11. 범위 밖 (다음 단계)
+
+- 손실분담·담보처분: `OVERDUE` 은행의 미결제 금액을 다른 은행이 나눠 지는 규칙
+- 예치금 원장의 별도 서버 분리 (`apply_instruction`을 HTTP로)
+- 응답 서명·공개키 서명(부인방지): 지금은 HMAC 공유키라 "허브가 꾸몄다"는 주장을 반박할 수 없다
+- 관리 사이트(React) 화면. 이 계획은 API와 CSV까지다
+- 가짜 은행 `902`의 장부·대사 (받기 전용이라 생략)

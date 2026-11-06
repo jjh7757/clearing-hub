@@ -110,6 +110,37 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/902/ping
 
 등록 응답의 `api_key`·`secret`은 그 은행 팀에게만 전달한다. AvengersBank는 서버 `.env`에 허브 주소와 함께 넣는다.
 
+등록한 뒤 주소나 이름이 바뀌면 다시 등록하지 않고 고친다 (코드·키는 그대로). 넣은 필드만 바뀐다:
+
+```bash
+curl -s -X PATCH https://clearing-hub.ai-agent-develop.cloud/admin/banks/903 \
+  -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"base_url":"https://new.example.com/interbank"}'
+curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping -H "X-Admin-Token: $TOKEN"
+```
+
+## UNKNOWN 거래 정리
+
+재시도를 다 해도 결과를 모르는 거래는 `UNKNOWN`으로 남고, 허브는 더 이상 자동으로 확인하지 않는다. 찾기:
+
+```bash
+curl -s "https://clearing-hub.ai-agent-develop.cloud/admin/transfers?status=UNKNOWN" -H "X-Admin-Token: $TOKEN"
+curl -s https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id>/events -H "X-Admin-Token: $TOKEN"
+```
+
+1. **받는 은행 장애가 풀렸으면 재확인**: 재시도 횟수를 0으로 하고 지금 한 번 확인한다. 이번에도 모르면 `PENDING`으로 남아 재시도 태스크가 이어서 확인한다
+   ```bash
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id>/recheck -H "X-Admin-Token: $TOKEN"
+   ```
+2. **받는 은행이 자동 확인(SPEC 4.3)에 답하지 못하면 직접 확정**: 받는 은행 팀에 그 `transfer_id`로 입금됐는지 물어 본 결과로 정한다. `reason`은 이력에만 남고 보내는 은행에는 보이지 않는다
+   ```bash
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id>/resolve \
+     -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" \
+     -d '{"status":"COMPLETED","reason":"SimBank 원장 확인 (담당 OOO)","holder_name":"김철수"}'
+   ```
+
+> **`FAILED`는 받는 은행에 입금이 없다는 것을 확인한 뒤에만 쓴다.** 보내는 은행이 출금을 되돌리므로, 입금이 됐는데 `FAILED`로 정하면 이중 지급이 된다. 모르겠으면 정하지 말고 `UNKNOWN`으로 둔다. `UNKNOWN`이 아닌 거래(`PENDING`·확정된 거래)는 둘 다 `409 TRANSFER_NOT_UNKNOWN`으로 거절된다.
+
 ## 서버 `.env`
 
 | 파일 | 키 | 값 |

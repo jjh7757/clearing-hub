@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
@@ -32,6 +33,14 @@ class TransferRequest(BaseModel):
         if (self.to_account is None) == (self.to_account_ref is None):
             raise ValueError("to_account와 to_account_ref 중 하나만 넣어야 합니다")
         return self
+
+
+class TransferResolve(BaseModel):
+    """관리자가 UNKNOWN 거래를 직접 확정한다. 받는 은행과 확인한 결과만 넣는다."""
+
+    status: Literal["COMPLETED", "FAILED"]
+    reason: str = Field(min_length=1, max_length=200, description="확인 방법·근거 (이력에만 남는다)")
+    holder_name: str | None = Field(default=None, min_length=1, max_length=50, description="COMPLETED일 때 예금주 (선택)")
 
 
 def spec_time(value: datetime | None) -> str | None:

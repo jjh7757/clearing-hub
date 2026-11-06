@@ -12,7 +12,7 @@ from clearing_hub.core.exceptions import ApiException
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.transfers import service
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
-from clearing_hub.domains.transfers.schemas import TransferDetail, TransferRequest, TransferResult
+from clearing_hub.domains.transfers.schemas import TransferDetail, TransferRequest, TransferResolve, TransferResult
 
 router = APIRouter(prefix="/v1/transfers", tags=["transfers"])
 admin_router = APIRouter(prefix="/admin/transfers", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -67,9 +67,12 @@ async def admin_list_transfers(db: DB, status: str | None = None, limit: int = 1
     stmt = select(Transfer).order_by(Transfer.requested_at.desc()).limit(min(limit, 500))
     if status:
         stmt = stmt.where(Transfer.status == status)
-    rows = (await db.scalars(stmt)).all()
-    return [{**TransferDetail.model_validate(t, from_attributes=True).model_dump(mode="json"), "from_bank": t.from_bank,
-             "to_account": "****" + t.to_account[-4:], "retry_count": t.retry_count} for t in rows]
+    return [_admin_view(t) for t in (await db.scalars(stmt)).all()]
+
+
+def _admin_view(t: Transfer) -> dict:
+    return {**TransferDetail.model_validate(t, from_attributes=True).model_dump(mode="json"), "from_bank": t.from_bank,
+            "to_account": "****" + t.to_account[-4:], "retry_count": t.retry_count}
 
 
 @admin_router.get("/{transfer_id}/events")
@@ -82,3 +85,16 @@ async def admin_transfer_events(transfer_id: str, db: DB):
 async def admin_confirm_pending(db: DB):
     """관리 화면의 '다시 확인' 버튼."""
     return {"confirmed": await service.confirm_pending(db)}
+
+
+@admin_router.post("/{transfer_id}/recheck")
+async def admin_recheck_unknown(transfer_id: str, db: DB):
+    """UNKNOWN 거래를 다시 자동 확인에 넣는다 (받는 은행 장애가 풀린 뒤). 지금 한 번 확인하고 결과 상태를 돌려준다."""
+    return _admin_view(await service.recheck_unknown(db, transfer_id))
+
+
+@admin_router.post("/{transfer_id}/resolve")
+async def admin_resolve_unknown(transfer_id: str, data: TransferResolve, db: DB):
+    """UNKNOWN 거래를 받는 은행과 직접 확인한 결과(COMPLETED/FAILED)로 확정한다.
+    FAILED면 보내는 은행이 출금을 되돌리므로, 받는 은행에 입금이 없다는 것을 확인한 뒤에만 쓴다."""
+    return _admin_view(await service.resolve_unknown(db, transfer_id, data))

@@ -1,14 +1,18 @@
 # 참가 은행 받기 (허브 관리자용)
 
-새 팀이 연동하러 오면 관리자가 할 일은 **초대 코드 하나 보내기**다. 등록·키·주소 변경·연결 확인은 은행이 [SPEC.md](SPEC.md) 7절대로 스스로 한다. 이 문서는 그 앞뒤에서 관리자가 보는 곳을 모은 것이다.
+관리자가 하는 일은 셋뿐이다. 등록·키·주소 변경·연결 확인·받는 쪽 시험·정산 확정은 은행과 허브가 스스로 한다 ([SPEC.md](SPEC.md) 7절, 3.7, 10.8).
+
+1. **초대 코드 발급·지문 전달** — 새 팀이 오면 (1)
+2. **알림 대응** — dispute, `OVERDUE`, `UNKNOWN`, ping 실패 등이 관리자 채널(`ALERT_WEBHOOK_URL`)에 오면 (5)
+3. **예치금·한도 요청 처리** — 은행이 더 보내야 한다고 하면 (4)
+
+이 문서는 그 셋을 할 때 보는 곳을 모은 것이다.
 
 명령은 모두 Session Manager(서버 안)에서 친다. 관리자 토큰은 화면·채팅에 띄우지 않는다.
 
 ```bash
 export HUB=https://clearing-hub.ai-agent-develop.cloud TOKEN=$(sudo grep '^ADMIN_TOKEN=' /srv/clearing-hub/.env | cut -d= -f2)
 ```
-
-> **곧 자동**으로 표시한 것은 다음 단계(SETTLEMENT_PLAN 7절 9단계)에서 관리자 손을 떠날 일이다. 지금은 관리자가 한다.
 
 ## 1. 팀이 오면: 초대 코드 + 지문
 
@@ -41,7 +45,7 @@ ClearingHub 참가 초대입니다.
 
 공개키·지문은 `curl -s $HUB/v1/hub-key`의 값과 같다. 지문을 초대 문구와 같은 DM으로 받으니, 은행은 API 응답만 믿지 않고 이 값과 맞춰 볼 수 있다. 9절(본인 계좌 조회)에 참여하는 팀이면 `CI_KEY`도 같은 DM으로 (`sudo grep '^CI_KEY=' /srv/clearing-hub/.env | cut -d= -f2`, DEPLOY.md "CI_KEY").
 
-그다음은 은행이 한다: 키 쌍 만들기 → 받는 쪽 API 3개 → `POST /v1/banks/register` → ping 확인 → 가짜 은행 `902`로 보내기 시험.
+그다음은 은행이 한다: 키 쌍 만들기 → 받는 쪽 API 3개 → `POST /v1/banks/register` → ping 확인 → 가짜 은행 `902`로 보내기 시험 → 셀프 시험(`POST /v1/test-receive`)으로 받기 시험. 등록되면 관리자 채널에 알림(`register`, ping 결과 포함)이 온다.
 
 **관리자가 직접 등록할 때** (코드를 정해야 하는 시연용 은행 등): 은행에게 공개키를 받아 `POST /admin/banks` `{"bank_code","name","base_url","public_key"}`(한도 `net_debit_cap`은 빼면 10억). 응답의 `api_key`는 이때만 나온다.
 
@@ -67,11 +71,14 @@ curl -s -X POST $HUB/admin/banks/903/ping -H "X-Admin-Token: $TOKEN"
 
 `ok`가 `false`면 결과 읽는 법은 SPEC 3.6 표. 은행도 같은 결과를 `POST /v1/me/ping`으로 볼 수 있으니 결과를 그대로 전해 주면 된다. **응답 서명이 틀린 은행(`response_signature_valid: false`)으로 가는 이체는 모두 `PENDING`이 된다** — 다른 은행이 그 은행으로 보내기 전에 고치게 한다.
 
-## 3. 받는 쪽 시험 요청 (곧 자동)
+## 3. 받는 쪽 시험 (은행이 스스로)
 
-가짜 은행 `902`는 보내지 않으므로, 은행이 받는 쪽(SPEC 7절 7)을 시험하려면 관리자가 AvengersBank(`901`, 모아 화면)에서 그 은행 시험 계좌로 소액 이체를 보낸다. 결과는 `GET /admin/transfers?status=...`와 `/admin/transfers/<id>/events`로 함께 본다.
+관리자가 이체를 보내 줄 필요가 없다. 은행이 셀프 시험 API(SPEC 3.7)를 부르면 허브가 가짜 은행 `902` 명의로 그 은행에 시험 이체를 만든다 (`POST /v1/test-receive`, 멱등 시험 `/resend`, 4.3 시험 `/status`, 은행별 하루 20번). 관리자가 볼 것은 둘이다.
 
-> 곧 자동: 은행이 직접 부르는 셀프 시험 API(`test-receive`).
+- 은행 서버가 5xx를 주거나 응답 서명이 틀리면 알림 `self_test`가 온다. 그 은행으로 가는 실제 이체도 `PENDING`이 될 상태이므로, 은행에 고치라고 알린다 (은행도 응답의 `receiver_reply`로 같은 것을 본다)
+- 알림 `sim_bank`(가짜 은행 한도 부족·비활성)가 오면 902에 예치금을 넣는다: `POST /admin/reserve/902/deposit` (4와 같은 명령). 셀프 시험 거래는 902가 낸 돈으로 정산에 들어가기 때문이다
+
+시험 거래는 `GET /admin/transfers`에 `from_bank 902`로 보이고, 내용은 `/admin/transfers/<id>/events`·`/evidence`로 본다.
 
 ## 4. 예치금·한도 요청
 
@@ -85,15 +92,20 @@ curl -s -X PATCH $HUB/admin/banks/903 -H "X-Admin-Token: $TOKEN" -H "Content-Typ
 
 모의 예치금이라 실제 돈과 무관하다. 분개는 `GET /admin/reserve/903/ledger`.
 
-## 5. 문제가 생겼을 때 보는 곳
+## 5. 알림이 오면 (문제가 생겼을 때 보는 곳)
 
-| 상황 | 보는 곳 | 할 일 |
+알림은 `ALERT_WEBHOOK_URL`(Slack·Discord)로 온다. 글 맨 앞 `[ClearingHub·종류]`가 아래 표의 종류이고, 둘째 줄에 `run_id`·`bank_code`·`transfer_id`가 붙는다. 웹훅을 넣지 않았으면 같은 내용이 서버 로그(`logger.error`·`warning`)에만 남는다.
+
+정산 확정은 관리자 일이 아니다: 포지션이 있는 은행이 모두 ack하면 즉시(`settled_by: auto-ack`), 아니면 매일 09:00 KST에 dispute가 없으면(`auto-deadline`) 확정되고 알림 `auto_confirm`이 온다 (SPEC 10.8). 관리자는 **dispute가 왔을 때만** 판정한다.
+
+| 알림 (종류) | 보는 곳 | 할 일 |
 |---|---|---|
-| 정산 DRAFT가 확정을 기다림 (매일 00:05 KST에 생김) | `GET /admin/settlements` | 은행들의 대사가 끝났으면 `POST /admin/settlements/<run_id>/confirm`. **곧 자동**: 은행 ack/dispute로 자동 확정 |
-| 확정 뒤 `OVERDUE` 은행 | 확정 응답의 `positions[].result`, `GET /admin/reserve` | 그 은행의 송금이 막혀 있다 (받기는 된다). 은행에 알리고 예치금 입금 또는 한도 상향 (4). **곧 자동**: 알림 웹훅 |
-| 은행이 대사 불일치를 알려 옴 (`run_id`, `transfer_id`) | `GET /admin/settlements/<run_id>`, `/admin/settlements/<run_id>/transfers.csv`, `GET /admin/transfers/<transfer_id>/evidence` | 확정하지 않는다. 증거 원문(서명된 요청·응답)으로 누가 무엇이라고 답했는지 확인. DRAFT면 `POST /admin/settlements/<run_id>/cancel`(거래는 다음 run으로) |
-| `UNKNOWN` 거래 | `GET /admin/transfers?status=UNKNOWN`, `/admin/transfers/<id>/events` | 받는 은행이 고쳐졌으면 `recheck`, 아니면 받는 은행과 확인 뒤 `resolve` (DEPLOY.md "UNKNOWN 거래 정리"). **곧 자동**: 알림 웹훅 |
-| 어떤 은행으로 가는 이체가 계속 `PENDING` | `POST /admin/banks/<code>/ping` | `response_signature_valid: false`거나 연결 안 됨. 그 은행에 ping 결과를 보낸다 |
+| 대사 불일치 (`dispute`), 마감 보류 (`deadline_held`), 배치 건너뜀 (`batch_skipped`) | `GET /admin/settlements/<run_id>`(`acks`·`disputed`, 은행이 짚은 `transfer_ids`), `/admin/settlements/<run_id>/transfers.csv`, `GET /admin/transfers/<transfer_id>/evidence` | 증거 원문(서명된 요청·응답)으로 누가 무엇이라고 답했는지 확인. 허브 기록이 맞으면 `POST /admin/settlements/<run_id>/confirm`(강제 확정, 돈을 바로잡을 일은 예치금 정정), 아니면 `POST /admin/settlements/<run_id>/cancel`(거래는 다음 run으로, ack 기록은 남는다). **판정하기 전에는 다음 날 배치가 건너뛴다.** 은행이 원인을 고쳐 ack를 다시 보내면 dispute가 풀리고 자동 확정된다 |
+| 확정 결과 `OVERDUE` (`overdue`) | `GET /admin/settlements/<run_id>`의 `positions[].result`, `GET /admin/reserve` | 그 은행의 송금이 막혀 있다 (받기는 된다). 은행에 알리고 예치금 입금 또는 한도 상향 (4) |
+| 거래 `UNKNOWN` (`unknown`) | `GET /admin/transfers?status=UNKNOWN`, `/admin/transfers/<id>/events` | 받는 은행이 고쳐졌으면 `recheck`, 아니면 받는 은행과 확인 뒤 `resolve` (DEPLOY.md "UNKNOWN 거래 정리") |
+| ping 실패 (`ping_failed`: 은행의 `PATCH /v1/me` 주소 변경이 거절됨), 셀프 등록 ping 실패 (`register`) | `POST /admin/banks/<code>/ping` | 주소는 바뀌지 않았다 (은행도 같은 결과를 받았다). 그 은행이 고치는지 지켜보고, 오래 안 되면 연락한다 |
+| 셀프 시험 5xx·서명 실패 (`self_test`), 가짜 은행 문제 (`sim_bank`) | 3 | 3 |
+| 어떤 은행으로 가는 이체가 계속 `PENDING` (알림 없음, 은행이 알려 옴) | `POST /admin/banks/<code>/ping` | `response_signature_valid: false`거나 연결 안 됨. 그 은행에 ping 결과를 보낸다 |
 | 은행 요청이 계속 401 | 은행이 받은 `message` | `등록된 공개키가 없습니다` → 공개키 등록(6), `서명이 맞지 않습니다` → 은행의 서명 코드·키 (SPEC 2.3 예시 값으로 확인) |
 
 ## 6. 키 문제

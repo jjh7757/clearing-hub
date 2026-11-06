@@ -1,4 +1,3 @@
-import json
 import logging
 from datetime import UTC, datetime
 from typing import Annotated
@@ -9,7 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clearing_hub.core.auth import current_bank, require_admin
-from clearing_hub.core.bank_client import bank_client
+from clearing_hub.core import alerts
+from clearing_hub.core.bank_client import bank_client, observed
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.database import get_db
 from clearing_hub.core.exceptions import ApiException
@@ -40,13 +40,7 @@ async def ping_bank(bank: Bank, base_url: str | None = None) -> PingResult:
     정상(ok)은 응답 서명이 맞고 status가 200 또는 404 ACCOUNT_NOT_FOUND일 때다. 응답 서명이 틀리면 BankReply는
     "응답 없음"이 되므로, 실제로 받은 상태·본문은 오간 원문(exchange)에서 꺼내 보여 준다 (은행이 고칠 곳을 찾게)."""
     reply = await bank_client.inquiry(bank, PING_ACCOUNT, base_url=base_url)
-    ex = reply.exchange
-    status = ex.response_status if ex else reply.status
-    try:
-        body = json.loads(ex.response_body) if ex and ex.response_body else reply.body
-    except ValueError:
-        body = {}
-    body = body if isinstance(body, dict) else {}
+    status, body = observed(reply)
     ok = reply.signature_valid is True and (
         status == 200 or (status == 404 and body.get("error") == "ACCOUNT_NOT_FOUND"))
     return PingResult(ok=ok, reachable=status is not None, status=status, body=body,
@@ -82,9 +76,12 @@ async def register(data: BankRegister, db: DB):
             logger.warning("셀프 등록 은행 코드 경합, 다시 시도 (%s)", attempt + 1)
     logger.info("셀프 등록: %s %s", bank.bank_code, bank.name, extra={"bank_code": bank.bank_code})
     hub_public = _hub_public_key()
+    ping = await ping_bank(bank)
+    alerts.notify("register", f"새 은행이 셀프 등록했습니다: {bank.bank_code} {bank.name}, "
+                  f"ping {'정상' if ping.ok else f'실패 (HTTP {ping.status}, 응답 서명 {ping.response_signature_valid})'}",
+                  bank_code=bank.bank_code, base_url=bank.base_url)
     return BankRegistered(bank_code=bank.bank_code, name=bank.name, api_key=api_key, hub_public_key=hub_public,
-                          hub_fingerprint=fingerprint(hub_public), net_debit_cap=bank.net_debit_cap,
-                          ping=await ping_bank(bank))
+                          hub_fingerprint=fingerprint(hub_public), net_debit_cap=bank.net_debit_cap, ping=ping)
 
 
 # ---- 은행 셀프 서비스 /v1/me (SPEC 3.6) ----
@@ -107,6 +104,9 @@ async def patch_me(data: MeUpdate, db: DB, bank: Annotated[Bank, Depends(current
     if new_url is not None and new_url != bank.base_url:
         ping = await ping_bank(bank, base_url=new_url)
         if not ping.ok:
+            alerts.notify("ping_failed", f"은행 {bank.bank_code}의 base_url 변경이 ping 실패로 거절됐습니다 "
+                          f"(HTTP {ping.status}, 응답 서명 {ping.response_signature_valid})",
+                          bank_code=bank.bank_code, base_url=new_url)
             raise ApiException(400, "PING_FAILED", "새 base_url이 정상으로 응답하지 않아 바꾸지 않았습니다 (ping 확인)",
                                extra={"ping": ping.model_dump()})
     # current_bank가 이미 세션을 썼으므로(autobegin) begin() 대신 commit한다

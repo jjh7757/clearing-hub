@@ -93,6 +93,18 @@ class BankReply:
         return str(message) if message else None
 
 
+def observed(reply: BankReply) -> tuple[int | None, dict[str, Any]]:
+    """은행이 실제로 돌려준 HTTP 상태와 본문. 응답 서명이 틀려 BankReply가 "응답 없음"이 됐어도 오간 원문(exchange)에서
+    꺼낸다 (ping·셀프 시험 결과를 은행에게 보여 줘 고칠 곳을 찾게). 응답을 못 받았으면 (None, {})."""
+    ex = reply.exchange
+    status = ex.response_status if ex else reply.status
+    try:
+        body = json.loads(ex.response_body) if ex and ex.response_body else reply.body
+    except ValueError:
+        body = {}
+    return status, body if isinstance(body, dict) else {}
+
+
 def _pick(headers, names: tuple[str, ...]) -> dict[str, str]:
     return {name: headers[name] for name in names if headers.get(name) is not None}
 

@@ -10,15 +10,34 @@ from clearing_hub.core.database import get_db
 from clearing_hub.core.exception_handlers import error_body, spec_http_status
 from clearing_hub.core.exceptions import ApiException, NotFound
 from clearing_hub.domains.banks.models import Bank
-from clearing_hub.domains.transfers import evidence, service
+from clearing_hub.domains.transfers import evidence, self_test, service
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
-from clearing_hub.domains.transfers.schemas import TransferDetail, TransferRequest, TransferResolve, TransferResult
+from clearing_hub.domains.transfers.schemas import (
+    SelfTestRequest, TransferDetail, TransferRequest, TransferResolve, TransferResult,
+)
 
 router = APIRouter(prefix="/v1/transfers", tags=["transfers"])
+# 은행 셀프 시험: 받는 쪽 (SPEC 3.7, SETTLEMENT_PLAN 13절)
+self_test_router = APIRouter(prefix="/v1/test-receive", tags=["self-test"])
 admin_router = APIRouter(prefix="/admin/transfers", tags=["admin"], dependencies=[Depends(require_admin)])
 
 DB = Annotated[AsyncSession, Depends(get_db)]
 Sender = Annotated[Bank, Depends(current_bank)]
+
+
+def _result_body(transfer: Transfer) -> tuple[int, dict]:
+    """3.3 응답의 (HTTP 상태, 본문). `_result_response`의 설명을 본다."""
+    result = TransferResult.model_validate(transfer, from_attributes=True).model_dump(mode="json")
+    match transfer.status:
+        case TransferStatus.COMPLETED:
+            return 200, result
+        case TransferStatus.FAILED:
+            code = transfer.fail_code or "INTERNAL_ERROR"
+            return spec_http_status(code), {
+                **error_body(code, transfer.fail_message or "받는 은행이 거절했습니다", transfer.transfer_id), "status": "FAILED",
+            }
+        case _:
+            return 202, {**result, "status": TransferStatus.PENDING.value}
 
 
 def _result_response(transfer: Transfer) -> JSONResponse:
@@ -27,17 +46,8 @@ def _result_response(transfer: Transfer) -> JSONResponse:
     재전송 때 거래가 아직 ACCEPTED·DELIVERING(허브가 받는 은행을 부르는 중)이거나 UNKNOWN(재시도를 다 해도 모름)이면
     3.3에는 없는 상태라 202 `PENDING`으로 답한다. 보내는 은행이 할 일이 같기 때문이다: 되돌리지 말고 3.4로 확인한다.
     3.4 결과 조회는 실제 상태를 그대로 보여 준다."""
-    result = TransferResult.model_validate(transfer, from_attributes=True).model_dump(mode="json")
-    match transfer.status:
-        case TransferStatus.COMPLETED:
-            return JSONResponse(status_code=200, content=result)
-        case TransferStatus.FAILED:
-            code = transfer.fail_code or "INTERNAL_ERROR"
-            return JSONResponse(status_code=spec_http_status(code), content={
-                **error_body(code, transfer.fail_message or "받는 은행이 거절했습니다", transfer.transfer_id), "status": "FAILED",
-            })
-        case _:
-            return JSONResponse(status_code=202, content={**result, "status": TransferStatus.PENDING.value})
+    status_code, body = _result_body(transfer)
+    return JSONResponse(status_code=status_code, content=body)
 
 
 @router.post("", responses={200: {"model": TransferResult}, 202: {"model": TransferResult}})
@@ -63,6 +73,38 @@ async def create_transfer(data: TransferRequest, db: DB, sender: Sender, request
 async def get_transfer(transfer_id: str, db: DB, sender: Sender):
     """처리 결과 조회 (SPEC 3.4). 자기 은행이 보낸 거래만."""
     return TransferDetail.model_validate(await service.get_transfer(db, sender, transfer_id), from_attributes=True)
+
+
+@self_test_router.post("", responses={200: {"model": TransferResult}, 202: {"model": TransferResult}})
+async def test_receive(data: SelfTestRequest, db: DB, bank: Sender):
+    """셀프 시험 이체 (SPEC 3.7): 허브가 가짜 은행 902 명의로 내 은행에 `amount`원을 보낸다 (내 `/receive`를 부른다).
+    응답은 3.3과 같은 형식(200 COMPLETED / 202 PENDING / 4xx FAILED)에 `receiver_reply`(내 서버가 돌려준 HTTP 상태·본문·
+    응답 서명 검증 결과)를 더한 것이다. 하루 SELF_TEST_DAILY_LIMIT번(429 TOO_MANY_TESTS), 902를 쓸 수 없으면 503."""
+    transfer, reply = await self_test.send(db, bank, data.to_account, data.amount)
+    status_code, body = _result_body(transfer)
+    return JSONResponse(status_code=status_code, content={**body, "receiver_reply": self_test.reply_view(reply)})
+
+
+def _probe(transfer: Transfer, reply) -> dict:
+    return {"transfer_id": transfer.transfer_id, "hub_status": transfer.status,
+            "receiver_reply": self_test.reply_view(reply)}
+
+
+@self_test_router.post("/{transfer_id}/resend")
+async def test_receive_resend(transfer_id: str, db: DB, bank: Sender):
+    """같은 transfer_id의 `/receive`를 한 번 더 보낸다 (SPEC 4.2 규칙 1, 멱등 시험). 허브의 거래 상태는 바뀌지 않는다.
+    내 은행으로 간 셀프 시험 거래가 아니면 403, COMPLETED가 아니면 409 TRANSFER_NOT_COMPLETED.
+    응답: `{transfer_id, hub_status, receiver_reply}` — 입금이 한 번만 됐는지는 내 장부로 확인한다."""
+    transfer, reply = await self_test.resend(db, bank, transfer_id)
+    return _probe(transfer, reply)
+
+
+@self_test_router.get("/{transfer_id}/status")
+async def test_receive_status(transfer_id: str, db: DB, bank: Sender):
+    """허브가 내 4.3 `GET /receive/{transfer_id}`를 불러 결과를 그대로 보여 준다 (허브 상태는 그대로).
+    내 은행으로 간 셀프 시험 거래가 아니면 403. 응답: `{transfer_id, hub_status, receiver_reply}`."""
+    transfer, reply = await self_test.status(db, bank, transfer_id)
+    return _probe(transfer, reply)
 
 
 @admin_router.get("")

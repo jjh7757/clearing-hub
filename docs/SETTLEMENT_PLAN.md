@@ -291,7 +291,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | 6. AvengersBank 대사·정리 **완료** | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `interbank_ledger.hub_run_id`, `settlement_reconciliations`, `settlement_sync.py`·`settlement_sync_loop()` 워커, `hub_client.settlements()`·`settlement(run_id)`, `reconcile()`의 SETTLE·예치금 기대값. 관리자 조회 API는 AvengersBank에 관리자 인증이 없어 만들지 않음 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록에 우리에게 없는 거래가 있으면 `MISMATCH`와 diff가 나온다 (`tests/test_settlement_sync.py`) |
 | 7. 시연·문서 **완료** | 1일 | [DEMO.md](DEMO.md)(9절 대본, curl과 기대 숫자), `tests/test_demo_scenario.py`(9절 1~8을 허브 API로 끝까지), 가짜 은행 `…0006`(입금 없이 `200 COMPLETED`), DEPLOY "정산 배포 순서"(마이그레이션 → 재시작 → 은행마다 예치금·한도 → `/admin/reserve` 확인 → 개시 정산, `SETTLEMENT_*`), `902` 예치금은 시드 스크립트 대신 관리자 curl, PROJECT_PLAN·README·SPEC v0.6.1 | 9절 시나리오가 끝까지 돈다 (`uv run pytest tests/test_demo_scenario.py`) |
 | 8. 부인방지 **8a~8d 완료** | 3.5일 | 12절 전체: Ed25519 요청·응답 서명, 키 등록·회전, 증거 보관, SPEC v1.0 초안. 8a(허브·가짜 은행, HMAC과 공존) 완료, 8b(AvengersBank: `INTERBANK_SIGNATURE_MODE`·`INTERBANK_SIGNING_KEY`·`HUB_PUBLIC_KEY`, 응답 서명 미들웨어, `hub_evidence`, 키 도구, 마이그레이션 `c0d1e2f3a4b5`, `tests/test_nonrepudiation.py`) 완료. **8c(허브): Ed25519 필수화·HMAC 삭제, 초대 코드 셀프 등록, `/v1/me`, 기본 한도 10억, 마이그레이션 `f3b8d2a7c4e1`, SPEC v1.0 다시 씀, ONBOARDING.md** 완료(12.11). **8d(AvengersBank): HMAC·`HUB_SECRET`·`INTERBANK_SIGNATURE_MODE` 삭제, Ed25519 전용, 셀프 등록 도구 `keys register-bank`·`ping`·`status`(`/v1/me`)** 완료(12.7) | 허브가 은행 서명을 만들 수 없고(허브 DB에 은행 비밀이 없다), 받은 응답으로 상대의 "답한 사실"을 증명할 수 있다 |
-| 9. 관리자 손 줄이기 **미착수** | 2일 | 정산 자동 확정(은행이 대사 결과를 ack/dispute → 모두 ack면 확정, dispute면 관리자), 은행 셀프 시험 `POST /v1/me/test-receive`(허브가 그 은행에 소액 시험 입금을 보내 4.2·4.3을 확인), 알림 웹훅(OVERDUE·UNKNOWN·대사 불일치) | 관리자 일이 "초대 코드 보내기"와 dispute 판정만 남는다 (docs/ONBOARDING.md의 "곧 자동") |
+| 9. 관리자 손 줄이기 **완료** | 2일 | 13절: 정산 자동 확정(`settlement_acks`, `POST /v1/settlements/{run_id}/ack`·`/dispute`, 전원 ack 즉시 확정 `auto-ack`, 09:00 KST 마감 `auto-deadline`, dispute면 관리자), 은행 셀프 시험 `POST /v1/test-receive`·`/resend`·`/status`(허브가 902 명의로 시험 이체), 알림 웹훅 `core/alerts.py`(`ALERT_WEBHOOK_URL`), 마이그레이션 `a9d4e2c6b8f1`, SPEC v1.1(3.7·10.8), AvengersBank 대사 결과 ack/dispute | 관리자 일이 "초대 코드 발급·지문 전달 / 알림 대응 / 예치금 요청 처리"만 남는다 (docs/ONBOARDING.md) |
 
 8단계는 돈의 흐름(1~7단계, 실제 금융망의 13단계)이 아니라 **신뢰 장치**다. 1~7과 독립이라 2단계 뒤 언제든 할 수 있지만, 규격이 깨지는 변경이라 다른 팀과 날짜를 맞춰야 한다 (12절). 8c에서 아직 연동한 팀이 없다는 점을 보고 전환 기간 없이 Ed25519만 남겼다 (12.11).
 
@@ -566,3 +566,55 @@ AvengersBank: `hub_evidence` 같은 표로 허브에서 받은 `/receive` 요청
 | 문서 | `INTERBANK.md`의 모드 표·전환 순서(1~8)·"5보다 6 먼저 금지" 삭제, `.env.example`·`DEPLOY.md`·README의 `HUB_SECRET` 삭제. 키 회전·유출 대응만 남긴다 |
 
 **운영 전환 순서** (허브 DEPLOY.md "Ed25519 필수화 배포 순서"와 같다): ① 서버 안에서 허브 키(`HUB_SIGNING_KEY`)·가짜 은행 키(`SIM_SIGNING_KEY`, `SIM_HUB_PUBLIC_KEY`) 만들기 ② AvengersBank가 키 쌍을 만들어 공개키·지문을 허브 관리자에게, 허브 관리자가 허브 공개키 지문을 AvengersBank에 ③ 허브 배포(정산 1~7·8a·8c가 한 번에 간다, 운영 `main`은 SPEC v0.5) + 바로 901·902 공개키 등록 ④ AvengersBank 8d 배포(`HUB_SECRET` 지우고 `INTERBANK_SIGNING_KEY`·`HUB_PUBLIC_KEY`) ⑤ 901·902 ping `ok: true`, 소액 이체. ③과 ④ 사이에는 901의 요청이 401, 901로 가는 이체가 `PENDING`(응답 서명 없음) 또는 401 `FAILED`이므로 짧게 붙여서 한다. 돈은 이중으로 움직이지 않는다.
+
+---
+
+## 13. 9단계: 관리자 손 줄이기 (허브·AvengersBank, 2026-11-06)
+
+**왜.** 8c까지 관리자가 손으로 하던 일이 셋 남았다: (1) 매일 DRAFT 확정(안 하면 다음 배치가 건너뜀), (2) 새 은행의 **받는 쪽** 시험을 위해 901에서 이체 보내 주기, (3) `/admin/reserve`·`UNKNOWN`·`OVERDUE`·대사 불일치를 들여다보기. 9단계는 이 셋을 자동화해 관리자 일을 "초대 코드 발급·지문 전달 / 알림 대응 / 예치금 요청 처리"로 줄인다.
+
+### 13.1 설계 결정
+
+| # | 항목 | 결정 | 이유 |
+|---|---|---|---|
+| 1 | 확정 조건 | 은행이 대사 결과를 보낸다(`ack` / `dispute`, run마다 은행당 한 행 `settlement_acks`, 덮어쓰기). **포지션이 있는 모든 은행이 ack하고 dispute가 없으면 그 ack 요청 안에서 확정**(`auto-ack`). 포지션 없는 은행의 ack는 기록만 | 돈이 움직이는 당사자가 모두 맞다고 한 순간이 확정 시점이다. 거래가 없는 은행은 확인할 것이 없다 |
+| 2 | 확정 마감 | 매일 `SETTLEMENT_CONFIRM_DEADLINE`(09:00 KST)에 dispute가 없으면 ack가 모자라도 확정(`auto-deadline`) | 대사는 선택(SPEC 10절)이다. 대사를 하지 않는 은행(가짜 은행 902 포함) 때문에 확정이 멈추면 매일 관리자가 다시 손을 대야 한다. 00:05 배치 뒤 9시간이면 은행이 맞춰 볼 시간으로 충분하다 |
+| 3 | dispute | 누가 보냈든 자동 확정을 막는다. 관리자가 확정(강제) 또는 취소. 같은 은행이 ack를 다시 보내면 풀린다. 취소해도 ack 기록은 남는다 | 불일치 판정은 증거를 보는 사람의 일이다. 은행이 자기 쪽 원인을 고친 경우를 위해 되돌릴 수 있게 한다 |
+| 4 | DRAFT에만 | ack·dispute는 `DRAFT`에만(그 밖은 409 `SETTLEMENT_NOT_DRAFT`) | `SETTLED`는 바뀌지 않는다(2절 8번). 확정 뒤의 불일치는 관리자에게 직접 알리고 예치금 정정으로 |
+| 5 | 동시성 | ack 처리는 run 행을 `FOR UPDATE`로 잠근다(`confirm`·`cancel_draft`와 같은 잠금) | 마지막 ack 두 개가 동시에 와도 확정은 한 번. 뒤의 요청은 409를 받고 10.5로 상태를 본다 |
+| 6 | 셀프 시험 | 허브가 **가짜 은행(`SIM_BANK_CODE`) 명의**로 `accept_and_deliver`를 그대로 부른다(`from_account 902-TEST-0001`, `sender_name "ClearingHub 시험"`). 새 칸 없이 보낸 은행·`from_account`로 셀프 시험 거래를 가린다 | 보통 이체와 같은 경로라 상태 머신·재시도·증거·정산이 따로 생기지 않는다. 902는 스스로 보내지 않으므로 902가 보낸 거래는 셀프 시험뿐이다 |
+| 7 | 셀프 시험 정산 | 셀프 시험 거래도 정산에 들어간다(902 → 시험 은행) | 모의 예치금이라 문제없고, 대사도 보통 거래처럼 시험된다. 902 한도가 모자라면 503 `SIM_BANK_UNAVAILABLE` + 알림 `sim_bank`(관리자가 902에 예치) |
+| 8 | resend | 같은 `transfer_id`의 `/receive`를 한 번 더(허브 상태 그대로, 증거는 남김). **`COMPLETED` 거래만**(아니면 409 `TRANSFER_NOT_COMPLETED`) | 거절한(`FAILED`) 거래를 다시 보내면 은행이 이번에는 입금할 수 있는데 허브에는 실패로 남아 장부가 어긋난다 |
+| 9 | 알림 | `core/alerts.notify(kind, text, **context)`: `ALERT_WEBHOOK_URL`이 있으면 `{"text","content"}`(Slack·Discord 겸용) POST, 5초, `asyncio.create_task`로 fire-and-forget, 실패는 `logger.warning`만. 동기 함수(`def`)이고 Task를 돌려준다 | 알림은 부가 기능이라 웹훅이 죽어도 이체·정산이 기다리거나 실패하면 안 된다. 동기 함수라 호출한 쪽이 await를 잊어 막힐 일이 없다 |
+
+### 13.2 허브에서 바뀐 것
+
+| 영역 | 내용 |
+|---|---|
+| 데이터 | 마이그레이션 `a9d4e2c6b8f1`: `settlement_acks(run_id FK, bank_code FK, result, transfer_ids_json, message, created_at, updated_at)`, PK (`run_id`, `bank_code`) |
+| 정산 | `settlement/auto_confirm.py`: `record`(잠금 → DRAFT 확인 → 덮어쓰기 → dispute면 알림, ack면 `ack_state`가 전원 ack일 때 `confirm(confirmed_by="auto-ack")`), `confirm_at_deadline`(dispute 있으면 `deadline_held` 알림만, 없으면 `auto-deadline` 확정). `service.list_for_bank`·`bank_view`가 내 ack도 읽는다(`my_ack`). `get_run`이 `acks`를 함께 읽는다(관리자 상세 `acks`·`disputed`) |
+| 워커 | `workers/settlement.py`: `next_deadline`, `run_deadline`(트랜잭션 1개), `needs_deadline_catch_up`(오늘 마감이 지났는데 그 전에 만든 DRAFT가 있으면). `settlement_loop`는 `next_cutoff`와 `next_deadline` 중 가까운 쪽까지 자고, 시작 때 마감 catch-up → 배치 catch-up 순으로 본다(놓친 마감의 DRAFT가 배치를 막지 않게). `run_daily`가 DRAFT 때문에 건너뛰면 알림 `batch_skipped` |
+| API | 은행용 `POST /v1/settlements/{run_id}/ack`·`/dispute`(`{transfer_ids, message?}`) → `{run_id, status, settled_at, my_ack}`, `GET /v1/settlements`·`/{run_id}`에 `my_ack`. 셀프 시험 `POST /v1/test-receive`(3.3 형식 + `receiver_reply`), `POST /v1/test-receive/{id}/resend`, `GET /v1/test-receive/{id}/status`(`{transfer_id, hub_status, receiver_reply}`). 관리자 `GET /admin/settlements/{id}`에 `acks`·`disputed` |
+| 알림 (`kind`) | `register`(셀프 등록, ping 결과), `ping_failed`(`PATCH /v1/me`), `dispute`, `auto_confirm`(ack·deadline, 은행 수·금액), `deadline_held`, `batch_skipped`, `overdue`(`confirm`), `unknown`(`_confirm_one`의 UNKNOWN 전이), `self_test`(은행 5xx·응답 서명 실패), `sim_bank`(902 없음·비활성·한도 부족) |
+| 설정 | `SETTLEMENT_CONFIRM_DEADLINE`(`09:00`), `SIM_BANK_CODE`(`902`), `SELF_TEST_DAILY_LIMIT`(20), `ALERT_WEBHOOK_URL` |
+| 그대로 | `SETTLEMENT_AUTO_CONFIRM`(생성 즉시 확정, 시연용), 거래 0건 run 즉시 확정, 관리자 `confirm`·`cancel` |
+| 문서 | SPEC v1.1(3.7, 10.8, 10.1·10.3·10.4·10.5·10.6·10.7, 7절 7, 5절 표, 8절 8·20·21, 체크리스트), ONBOARDING(관리자 일 셋, 알림 대응 표), DEPLOY(새 설정, 9단계 배포), DEMO(자동 확정 한 줄), `.env.example` |
+| 테스트 | `tests/test_settlement_ack.py`(전원 ack·일부 ack·포지션 없는 은행·dispute와 다시 ack·검증·DRAFT만·마감 확정/보류·관리자 강제 확정·`next_deadline`·catch-up·루프), `tests/test_self_test.py`(성공·`0002` 거절·resend 멱등·남의 거래 403·`status`·하루 한도·검증·902 없음/비활성/한도 부족 503·5xx·서명 실패 알림·정산 포함), `tests/test_alerts.py`(본문 키·URL 없음·루프 밖·실패와 지연에도 예외 없이 바로 돌아옴·길이 자르기·셀프 등록·ping 실패·`OVERDUE`·`UNKNOWN`). conftest의 `alert_sink`(httpx MockTransport) |
+
+### 13.3 AvengersBank에서 바뀐 것 (`feature/backend-api`)
+
+`settlement_sync.reconcile_run`이 대사 결과를 허브에 보낸다. 허브 `status`가 `DRAFT`일 때만(그 밖은 409라 보내지 않는다), run마다 한 번: `MATCHED`면 `hub_client.ack_settlement(run_id)`, `MISMATCH`면 `hub_client.dispute_settlement(run_id, hub_only + differs, message)`. `settlement_reconciliations`에 `acked_at`·`disputed_at`(보낸 시각, 마이그레이션 1개). 결과가 바뀌면(MISMATCH → MATCHED) 다시 보낸다. ack 응답의 `status`가 `SETTLED`(전원 ack로 즉시 확정)거나 409 `SETTLEMENT_NOT_DRAFT`(그사이 확정·취소됨)면 다음 주기를 기다리지 않고 상세를 다시 받아 장부 정리까지 한다. 보내지 못하면(응답 없음·5xx) 시각을 남기지 않아 다음 주기에 다시 보낸다 (대사·장부 정리는 그대로 돈다).
+
+### 13.4 관리자에게 남는 일 (최종)
+
+1. **초대 코드 발급·허브 공개키 지문 전달** (새 팀마다, ONBOARDING 1)
+2. **알림 대응**: `dispute`·`deadline_held`·`batch_skipped`(판정: 확정 또는 취소), `overdue`(예치금·한도), `unknown`(recheck·resolve), `ping_failed`·`register` ping 실패·`self_test`(그 은행에 알림), `sim_bank`(902 예치)
+3. **예치금·한도 요청 처리** (은행이 요청할 때, ONBOARDING 4)
+4. 드문 일: 키 유출·분실(ONBOARDING 6), `SETTLED` 뒤에 은행이 알려 온 불일치(예치금 정정)
+
+### 13.5 한계
+
+- 마감 시각 확정은 ack하지 않은 은행이 있어도 된다. 대사를 늦게 하는 은행은 `SETTLED`를 맞춰 보게 되고, 그때의 불일치는 dispute로 보낼 수 없다 (관리자에게 직접)
+- 관리자가 마감 직전에 만든 즉시 마감 DRAFT도 그 마감에 확정된다 (은행이 맞춰 볼 시간이 짧다). 시연용 기능이라 막지 않았다
+- 알림은 트랜잭션 커밋 전에 나갈 수 있다 (예: 확정의 `overdue`). 커밋이 실패하면 알림만 남지만 같은 사건의 오류 로그가 함께 남는다
+- 셀프 시험 하루 한도는 잠그지 않고 센다 (동시 요청 몇 건은 넘을 수 있다. 금액이 작아 문제없다)

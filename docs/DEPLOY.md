@@ -165,7 +165,14 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping
    ```
    AvengersBank가 그 거래들의 내부 분개(`interbank_ledger`)를 갖고 있지 않으면 이 run은 AvengersBank 쪽에서 `MISMATCH`(`hub_only`)로 남는다. 그 run만 그렇고 이체와 다음 run의 대사는 계속된다
 
-배포 뒤에는 워커가 매일 00:05(KST) 어제 정산일의 DRAFT를 만든다. 자동 확정(`SETTLEMENT_AUTO_CONFIRM`)이 꺼져 있으면 관리자가 확정한다(`POST /admin/settlements/{run_id}/confirm`). **DRAFT를 확정하지 않고 두면 다음 날 배치는 경고만 남기고 건너뛴다** (거래는 미정산으로 남아 다음 run에 들어가고, 그동안 순채무에서도 빠지지 않는다).
+배포 뒤에는 워커가 매일 00:05(KST) 어제 정산일의 DRAFT를 만든다. 확정은 9단계부터 자동이다: 포지션이 있는 은행이 모두 ack하면 즉시, 아니면 09:00(KST, `SETTLEMENT_CONFIRM_DEADLINE`)에 dispute가 없으면 확정된다 (SPEC 10.8). **dispute가 있는 DRAFT는 관리자가 확정하거나 취소해야 하고, 그동안 다음 날 배치는 건너뛴다** (알림 `batch_skipped`. 거래는 미정산으로 남아 다음 run에 들어가고, 그동안 순채무에서도 빠지지 않는다).
+
+### 9단계 배포 (자동 확정·셀프 시험·알림)
+
+1. 마이그레이션 `a9d4e2c6b8f1`(`settlement_acks`)은 배포 때 자동으로 돈다 (기존 테이블은 그대로)
+2. 서버 `.env`에 `ALERT_WEBHOOK_URL`을 넣는다 (관리자 채널의 incoming webhook). 나머지 새 설정은 기본값이면 넣지 않아도 된다
+3. 재시작 뒤 확인: `curl -s $HUB/` → `"spec": "v1.1"`. 알림 시험은 아무 은행이나 `POST /v1/test-receive`로 5xx를 일으키기보다, 서버 안에서 `curl -s -X POST "$ALERT_WEBHOOK_URL" -H 'Content-Type: application/json' -d '{"text":"ClearingHub 알림 시험","content":"ClearingHub 알림 시험"}'`로 채널에 글이 오는지 본다
+4. 셀프 시험은 902(가짜 은행)의 순채무한도 안에서 돈다. 902는 셀프 시험마다 돈을 내므로, 알림 `sim_bank`(한도 부족)가 오면 `POST /admin/reserve/902/deposit`으로 예치금을 넣는다
 
 ## Ed25519 필수화 배포 순서 (8c, SPEC v1.0)
 
@@ -239,7 +246,11 @@ curl -s https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id
 | | `SETTLEMENT_WORKER_ENABLED` | `true`(기본): 일일 정산 배치 태스크를 띄운다. `false`면 관리자가 `POST /admin/settlements/run`으로만 |
 | | `SETTLEMENT_CUTOFF_TIME` | `00:05`(기본, `HH:MM`). 매일 이 시각에 어제 정산일의 DRAFT를 만든다 |
 | | `SETTLEMENT_TIMEZONE` | `Asia/Seoul`(기본). 정산일·마감 시각의 기준 |
-| | `SETTLEMENT_AUTO_CONFIRM` | `false`(기본): 관리자가 대사 뒤 확정. `true`면 배치가 DRAFT를 바로 확정한다 (시연용) |
+| | `SETTLEMENT_AUTO_CONFIRM` | `false`(기본): 은행 확인(ack)·마감 시각으로 확정. `true`면 배치가 DRAFT를 대사 없이 바로 확정한다 (시연용) |
+| | `SETTLEMENT_CONFIRM_DEADLINE` | `09:00`(기본, `HH:MM`). 확정 마감: 포지션이 있는 은행이 모두 ack하지 않았어도 이 시각에 dispute가 없는 DRAFT를 확정한다 (SPEC 10.8). dispute가 있으면 확정하지 않고 알림 |
+| | `SIM_BANK_CODE` | `902`(기본). 셀프 시험(SPEC 3.7)에서 허브가 이 은행 명의로 시험 이체를 만든다. 이 은행이 없거나 비활성이면 셀프 시험은 503 `SIM_BANK_UNAVAILABLE` |
+| | `SELF_TEST_DAILY_LIMIT` | `20`(기본). 은행별 하루(KST) 셀프 시험 횟수 (넘으면 429 `TOO_MANY_TESTS`) |
+| | `ALERT_WEBHOOK_URL` | 관리자 알림 웹훅 (Slack·Discord incoming webhook. 본문 `{"text","content"}`). 비우면 보내지 않고 로그만 남긴다. dispute·자동 확정·배치 건너뜀·`OVERDUE`·`UNKNOWN`·셀프 등록·ping 실패·셀프 시험 5xx·가짜 은행 한도 부족을 보낸다. **비밀값이다** (주소만 알면 누구나 그 채널에 글을 쓸 수 있다) |
 | | `HUB_SIGNING_KEY` | **필수.** 허브 Ed25519 개인키 (raw 32바이트 base64, 44자). 서버 안에서 생성 ("Ed25519 필수화 배포 순서" 2). 없거나 형식이 틀리면 허브가 시작하지 않는다 (마이그레이션도 같은 설정을 읽는다) |
 | | `PREVIOUS_KEY_TTL_SECONDS` | `86400`(기본). 은행 공개키 회전 뒤 옛 키를 받아 주는 시간 |
 | | `INVITE_TTL_DAYS` | `7`(기본). 초대 코드 유효 기간 |

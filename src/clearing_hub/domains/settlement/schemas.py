@@ -61,9 +61,22 @@ class PairOut(BaseModel):
     net_direction: str = Field(description="a_to_b / b_to_a / none")
 
 
+class AckAdminOut(BaseModel):
+    """관리자 화면의 은행 확인 결과 한 줄 (SETTLEMENT_PLAN 13절)."""
+
+    bank_code: str
+    result: str = Field(description="ACK / DISPUTE")
+    transfer_ids: list[str] = Field(description="DISPUTE: 은행이 차이 난다고 한 transfer_id")
+    message: str | None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime = Field(description="마지막으로 받은 시각 (다시 보내면 덮어쓴다)")
+
+
 class SettlementDetail(SettlementRunOut):
     positions: list[PositionOut] = Field(description="은행별 순 포지션, 은행 코드순. 합은 0")
     pairs: list[PairOut] = Field(description="은행 쌍별 표 (화면·CSV용)")
+    acks: list[AckAdminOut] = Field(default=[], description="은행이 보낸 ack/dispute, 은행 코드순")
+    disputed: bool = Field(default=False, description="DISPUTE가 하나라도 있으면 true. 자동 확정하지 않는다")
 
 
 class SettlementTransferOut(BaseModel):
@@ -87,6 +100,7 @@ class BankSettlementOut(BaseModel):
     settled_at: UtcDatetime | None = Field(description="확정 시각. DRAFT면 null")
     net_amount: int = Field(description="내 포지션: 받을 돈 − 줄 돈. 그 run에 내 거래가 없으면 0")
     result: str | None = Field(description="내 예치금 반영 결과 OK / OVERDRAWN / OVERDUE. 확정 전이거나 내 거래가 없으면 null")
+    my_ack: Literal["ACK", "DISPUTE"] | None = Field(description="내가 보낸 대사 결과 (SPEC 10.8). 안 보냈으면 null")
 
 
 class BankSettlementList(BaseModel):
@@ -125,3 +139,21 @@ class BankSettlementDetail(BaseModel):
     settled_at: UtcDatetime | None
     position: BankPositionOut
     transfers: list[ReconTransferOut] = Field(description="그 run에서 내가 보내거나 받은 거래, 끝난 시각 순")
+    my_ack: Literal["ACK", "DISPUTE"] | None = Field(description="내가 보낸 대사 결과 (SPEC 10.8). 안 보냈으면 null")
+
+
+class DisputeIn(BaseModel):
+    """POST /v1/settlements/{run_id}/dispute 본문 (SPEC 10.8)."""
+
+    transfer_ids: list[Annotated[str, Field(min_length=1, max_length=36)]] = Field(
+        max_length=1000, description="차이 나는 transfer_id (허브에만 있는 것, 금액·방향이 다른 것). 비어도 된다")
+    message: str | None = Field(default=None, max_length=200, description="사람이 읽는 설명 (선택)")
+
+
+class AckOut(BaseModel):
+    """ack·dispute 응답: 그 run의 지금 상태와 내 확인 결과. ack로 전원 ack가 되면 status가 바로 SETTLED다."""
+
+    run_id: int
+    status: str = Field(description="DRAFT / SETTLED")
+    settled_at: UtcDatetime | None
+    my_ack: Literal["ACK", "DISPUTE"]

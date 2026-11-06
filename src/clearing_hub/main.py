@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 
+from clearing_hub.core import alerts
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.database import engine
 from clearing_hub.core.exception_handlers import register_exception_handlers
@@ -22,6 +23,7 @@ from clearing_hub.domains.settlement.router import admin_router as settlement_ad
 from clearing_hub.domains.settlement.router import router as settlement_router
 from clearing_hub.domains.transfers.router import admin_router as transfer_admin_router
 from clearing_hub.domains.transfers.router import router as transfer_router
+from clearing_hub.domains.transfers.router import self_test_router
 from clearing_hub.workers.retry import retry_loop
 from clearing_hub.workers.settlement import settlement_loop
 
@@ -39,6 +41,7 @@ async def lifespan(app: FastAPI):
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
+        await alerts.drain()  # 보내는 중인 알림을 잠깐(최대 5초) 기다린다
         await engine.dispose()
 
 
@@ -58,6 +61,7 @@ app.include_router(bank_router)
 app.include_router(keys_router)
 app.include_router(inquiry_router)
 app.include_router(transfer_router)
+app.include_router(self_test_router)
 app.include_router(account_router)
 app.include_router(reserve_router)
 app.include_router(settlement_router)
@@ -71,4 +75,4 @@ app.include_router(settlement_admin_router)
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v1.0"}  # docs/SPEC.md 버전과 맞춘다
+    return {"service": "ClearingHub", "spec": "v1.1"}  # docs/SPEC.md 버전과 맞춘다

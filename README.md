@@ -118,6 +118,6 @@ docker logs clearing-hub 2>&1 | grep <request_id>
 
 - 관리자 JWT 로그인 (지금은 `ADMIN_TOKEN` 헤더)
 - 정산(마감 상계 → 대사 → 예치금 결제): [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md) 1~7단계 완료 — 예치금 원장(`reserve/`), 순채무한도(접수 때 `LIMIT_EXCEEDED`, `transfers/exposure.py`), 정산 DRAFT·확정·일일 워커(`settlement/`, `workers/settlement.py`), 은행용 대사 API(SPEC 10절), AvengersBank 대사·장부 정리, 시연([docs/DEMO.md](docs/DEMO.md))
-- 부인방지(계획서 12절, SPEC v1.0 초안): 8a·8b·**8c 완료** — 서명은 Ed25519 하나(HMAC 삭제, 허브는 은행 비밀을 갖지 않는다), 응답 서명 필수, 키 회전 24시간, 증거 원문 보관(`transfer_evidence`), 초대 코드 셀프 등록·`/v1/me`·기본 한도 10억. 다음은 **8d AvengersBank 정리**(HMAC 걷어내기, 계획서 12.11)
-- 9단계(미착수): 정산 자동 확정(은행 ack/dispute), 은행 셀프 시험(`test-receive`), 알림 웹훅
+- 부인방지(계획서 12절, SPEC v1.0): 8a~8d 완료 — 서명은 Ed25519 하나(HMAC 삭제, 허브는 은행 비밀을 갖지 않는다), 응답 서명 필수, 키 회전 24시간, 증거 원문 보관(`transfer_evidence`), 초대 코드 셀프 등록·`/v1/me`·기본 한도 10억
+- 9단계(계획서 13절, SPEC v1.1) 완료: 정산 자동 확정(은행 ack/dispute, 전원 ack 즉시·09:00 KST 마감), 은행 셀프 시험(`POST /v1/test-receive`), 알림 웹훅(`ALERT_WEBHOOK_URL`). 관리자 일은 [docs/ONBOARDING.md](docs/ONBOARDING.md)
 - 관리 사이트(React)

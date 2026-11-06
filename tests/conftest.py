@@ -9,6 +9,7 @@ os.environ["RETRY_INTERVAL_SECONDS"] = "3600"  # 테스트는 confirm_pending을
 os.environ["RETRY_MAX_COUNT"] = "3"
 os.environ["SETTLEMENT_WORKER_ENABLED"] = "false"  # 테스트 DB에 run을 만들지 않게. 워커 함수는 테스트가 직접 부른다
 os.environ["SIM_DELAY_SECONDS"] = "1"  # 허브 타임아웃(0.3초)보다 길게
+os.environ["ALERT_WEBHOOK_URL"] = ""  # 로컬 .env에 웹훅이 있어도 테스트는 보내지 않는다. 알림 시험은 alert_sink 픽스처로
 
 from clearing_hub.core.signing import generate_keypair, public_key_of, sign_ed25519  # noqa: E402
 
@@ -20,10 +21,12 @@ SIM_PRIVATE_KEY, SIM_PUBLIC_KEY = generate_keypair()
 os.environ["SIM_SIGNING_KEY"] = SIM_PRIVATE_KEY
 os.environ["SIM_HUB_PUBLIC_KEY"] = HUB_PUBLIC_KEY
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 import bank_sim.main as sim
+from clearing_hub.core import alerts
 from clearing_hub.core import bank_client as bank_client_module
 from clearing_hub.core.bank_client import BankClient
 from clearing_hub.core.config import get_settings
@@ -140,6 +143,27 @@ async def send_902_to_901(sender, receiver, monkeypatch, amount: int) -> dict:
         monkeypatch.setenv("SIM_SIGNING_KEY", SIM_PRIVATE_KEY)
     assert res.status_code == 200 and res.json()["status"] == "COMPLETED", res.text
     return payload
+
+
+@pytest.fixture
+def alert_sink(monkeypatch) -> list[dict]:
+    """ALERT_WEBHOOK_URL을 가짜 웹훅(httpx MockTransport)으로 둔다. 웹훅이 받은 JSON 본문이 이 목록에 쌓인다.
+    알림은 fire-and-forget이라, 볼 때는 `await sent_alerts(sink, kind)`로 보내는 중인 것을 기다린 뒤 본다."""
+    received: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received.append(json.loads(request.content))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(get_settings(), "alert_webhook_url", "http://alerts.test/hook")
+    monkeypatch.setattr(alerts, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return received
+
+
+async def sent_alerts(sink: list[dict], kind: str) -> list[str]:
+    """그 종류(`[ClearingHub·kind]`)로 웹훅에 간 알림 글."""
+    await alerts.drain()
+    return [m["text"] for m in sink if m["text"].startswith(f"[ClearingHub·{kind}]")]
 
 
 __all__ = ["BankClient"]

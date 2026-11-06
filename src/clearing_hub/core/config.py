@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     settlement_cutoff_time: str = Field(default="00:05", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")  # 매일 마감 배치 시각 (HH:MM)
     settlement_timezone: str = "Asia/Seoul"  # 정산일·마감 시각의 기준 시간대
     settlement_auto_confirm: bool = False  # true면 DRAFT를 대사 없이 바로 확정 (시연용)
+    # 9단계 (SETTLEMENT_PLAN 13절): 매일 이 시각(HH:MM, settlement_timezone)에 dispute 없는 DRAFT를 확정한다.
+    # 그 전에 포지션이 있는 은행이 모두 ack하면 그 자리에서 확정한다 (settlement/auto_confirm.py)
+    settlement_confirm_deadline: str = Field(default="09:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    # 셀프 시험 (SPEC 3.7): 허브가 이 은행(가짜 은행) 명의로 시험 이체를 만든다. 은행별 하루(settlement_timezone) 횟수
+    sim_bank_code: str = Field(default="902", pattern=r"^\d{3}$")
+    self_test_daily_limit: int = Field(default=20, gt=0)
+    # 알림 웹훅 (core/alerts.py). Slack·Discord의 incoming webhook 주소. 비우면 알림을 보내지 않는다 (로그만)
+    alert_webhook_url: str | None = None
     # 부인방지 (SETTLEMENT_PLAN 12절, SPEC 2절). 허브 Ed25519 개인키(raw 32바이트 base64, 44자). **필수**:
     # 허브는 모든 은행 호출에 이 키로 서명하고 /v1 응답에도 서명한다. 없거나 형식이 틀리면 서버가 시작하지 않는다
     hub_signing_key: SecretStr

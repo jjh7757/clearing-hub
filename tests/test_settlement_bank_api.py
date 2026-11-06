@@ -18,8 +18,8 @@ from tests.conftest import ADMIN, register_bank, send_902_to_901, transfer_paylo
 pytestmark = pytest.mark.anyio
 KST = ZoneInfo("Asia/Seoul")
 
-LIST_KEYS = {"run_id", "settle_date", "cutoff_at", "status", "settled_at", "net_amount", "result"}
-DETAIL_KEYS = {"run_id", "settle_date", "cutoff_at", "status", "settled_at", "position", "transfers"}
+LIST_KEYS = {"run_id", "settle_date", "cutoff_at", "status", "settled_at", "net_amount", "result", "my_ack"}
+DETAIL_KEYS = {"run_id", "settle_date", "cutoff_at", "status", "settled_at", "position", "transfers", "my_ack"}
 POSITION_KEYS = {"sent_count", "sent_total", "recv_count", "recv_total", "net_amount", "result", "balance_after"}
 TRANSFER_KEYS = {"transfer_id", "direction", "counterparty_bank", "amount", "finished_at"}
 EMPTY_POSITION = {"sent_count": 0, "sent_total": 0, "recv_count": 0, "recv_total": 0, "net_amount": 0,
@@ -240,5 +240,5 @@ async def test_admin_token_is_not_bank_auth(client, banks):
 
 
 async def test_root_spec_version(client):
-    """루트 응답의 규격 버전은 docs/SPEC.md와 같다 (v1.0)."""
-    assert (await client.get("/")).json() == {"service": "ClearingHub", "spec": "v1.0"}
+    """루트 응답의 규격 버전은 docs/SPEC.md와 같다 (v1.1)."""
+    assert (await client.get("/")).json() == {"service": "ClearingHub", "spec": "v1.1"}

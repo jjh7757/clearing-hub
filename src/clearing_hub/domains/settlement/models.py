@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 
 from sqlalchemy import (
-    BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, text,
+    BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, String, Text, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,12 +50,14 @@ class SettlementRun(Base):
     created_by: Mapped[str] = mapped_column(String(50), nullable=False)  # "admin" / "auto" (workers/settlement.py)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # service.confirm
-    settled_by: Mapped[str | None] = mapped_column(String(50))  # service.confirm: 관리자("admin") / "auto"
+    # service.confirm: 관리자("admin") / 워커 "auto" / 은행 전원 ack "auto-ack" / 마감 시각 "auto-deadline" (auto_confirm.py)
+    settled_by: Mapped[str | None] = mapped_column(String(50))
 
     # 비동기 세션에서 지연 로딩은 쓸 수 없으므로 "raise": 읽을 때는 selectinload로 함께 읽는다 (service.get_run)
     positions: Mapped[list["SettlementPosition"]] = relationship(lazy="raise", order_by="SettlementPosition.bank_code")
     pairs: Mapped[list["SettlementPair"]] = relationship(
         lazy="raise", order_by="[SettlementPair.bank_a, SettlementPair.bank_b]")
+    acks: Mapped[list["SettlementAck"]] = relationship(lazy="raise", order_by="SettlementAck.bank_code")
 
 
 class SettlementPosition(Base):
@@ -90,3 +92,26 @@ class SettlementPair(Base):
     b_to_a_total: Mapped[int] = mapped_column(BigInteger, nullable=False)
     net_amount: Mapped[int] = mapped_column(BigInteger, nullable=False)  # |a_to_b_total − b_to_a_total|
     net_direction: Mapped[str] = mapped_column(String(10), nullable=False)  # PairDirection
+
+
+class AckResult(StrEnum):
+    ACK = "ACK"  # 은행이 대사 파일을 자기 장부와 맞춰 보니 일치한다
+    DISPUTE = "DISPUTE"  # 안 맞는다. 자동 확정을 막고 관리자가 판정한다 (확정 또는 취소)
+
+
+class SettlementAck(Base):
+    """은행의 대사 결과 (SETTLEMENT_PLAN 13절, SPEC 10.8). run마다 은행당 한 행. 다시 보내면 덮어쓴다
+    (ACK → DISPUTE, DISPUTE → ACK 모두). DRAFT일 때만 받는다. run이 취소·확정돼도 기록으로 남긴다.
+
+    포지션이 있는 모든 은행이 ACK이고 DISPUTE가 하나도 없으면 그 자리에서 확정한다 (auto_confirm.record).
+    포지션이 없는 은행의 ACK는 기록만 하고 조건에는 세지 않는다. DISPUTE는 누가 보냈든 자동 확정을 막는다."""
+
+    __tablename__ = "settlement_acks"
+
+    run_id: Mapped[int] = mapped_column(ForeignKey("settlement_runs.run_id"), primary_key=True)
+    bank_code: Mapped[str] = mapped_column(ForeignKey("banks.bank_code"), primary_key=True)
+    result: Mapped[str] = mapped_column(String(10), nullable=False)  # AckResult
+    transfer_ids_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)  # DISPUTE: 차이 나는 transfer_id 목록
+    message: Mapped[str | None] = mapped_column(String(200))  # DISPUTE의 설명 (선택)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)  # 처음 받은 시각
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)  # 마지막으로 받은 시각

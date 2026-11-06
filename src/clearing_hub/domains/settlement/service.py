@@ -1,5 +1,6 @@
 """정산 배치: 8단계 수집·9단계 다자간 차액 계산(DRAFT), 11·12단계 확정·예치금 반영 (SETTLEMENT_PLAN 2절 2·3·4·7번, 5.1),
 10단계 은행용 대사 파일 (`list_for_bank`·`bank_view`, 6.1, SPEC 10절).
+은행의 ack/dispute와 자동 확정(전원 ack·마감 시각)은 `auto_confirm.py` (13절).
 
 커밋은 하지 않는다. 라우터(`async with db.begin()`)나 워커(`workers/settlement.py`)가 트랜잭션을 정한다.
 예치금은 이 도메인이 직접 바꾸지 않는다. `confirm`이 지시서(`instruction_for`)를 `reserve.apply_instruction`에 넘긴다 (2절 1번).
@@ -16,13 +17,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from clearing_hub.core import alerts
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.exceptions import ApiException, NotFound
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.reserve import service as reserve_service
 from clearing_hub.domains.reserve.models import PositionStatus
 from clearing_hub.domains.settlement.models import (
-    PairDirection, SettlementPair, SettlementPosition, SettlementRun, SettlementStatus,
+    PairDirection, SettlementAck, SettlementPair, SettlementPosition, SettlementRun, SettlementStatus,
 )
 from clearing_hub.domains.transfers.models import Transfer, TransferStatus
 
@@ -84,7 +86,7 @@ async def create_draft(db: AsyncSession, settle_date: date | None, created_by: s
         raise _draft_exists(draft.run_id)
 
     run = SettlementRun(settle_date=settle_date, cutoff_at=cutoff_at, status=SettlementStatus.DRAFT,
-                        tx_count=0, total_amount=0, created_by=created_by, positions=[], pairs=[])
+                        tx_count=0, total_amount=0, created_by=created_by, positions=[], pairs=[], acks=[])
     db.add(run)
     try:
         await db.flush()
@@ -197,10 +199,11 @@ async def confirm(db: AsyncSession, run_id: int, *, confirmed_by: str = "admin",
     1. run 행을 잠근다(`_lock_run`, FOR UPDATE). DRAFT가 아니면 409 SETTLEMENT_NOT_DRAFT(`run_id`) — 두 번 확정,
        취소와 겹친 확정을 막는다 (`cancel_draft`도 같은 잠금을 쓴다)
     2. 포지션(은행 코드순) → 지시서 `instruction_for(run)` → `reserve.apply_instruction(db, run_id, 지시서)`
-       (분개의 created_by는 "settlement". 누가 확정했는지는 run의 `settled_by`에 적는다: 관리자 / "auto")
+       (분개의 created_by는 "settlement". 누가 확정했는지는 run의 `settled_by`에 적는다: 관리자 / "auto" /
+       "auto-ack" / "auto-deadline")
     3. 결과(OK / OVERDRAWN / OVERDUE, 반영 뒤 잔액)를 포지션의 `result`·`balance_after`에 옮겨 적는다
     4. `status = SETTLED`, `settled_at`, `settled_by`. 사유(`reason`)는 로그에만 남긴다
-    5. OVERDUE 은행이 있으면 logger.error (관리자 알림). 그 은행은 접수 때 순채무한도 검사에 걸려 송금이 막히고
+    5. OVERDUE 은행이 있으면 logger.error + 알림 웹훅 `overdue`. 그 은행은 접수 때 순채무한도 검사에 걸려 송금이 막히고
        받기만 된다. 관리자가 예치하면 풀린다 (2절 7번)
 
     **순채무(exposure, 4.4)와의 관계**: exposure는 SETTLED가 아닌 run의 거래를 계속 센다. SETTLED로 바꾸는 것과
@@ -232,15 +235,19 @@ async def confirm(db: AsyncSession, run_id: int, *, confirmed_by: str = "admin",
             logger.error("정산 run %s 확정: 은행 %s 예치금 부족 OVERDUE (잔액 %s원, 순채무한도 %s원). "
                          "송금이 막힙니다. 관리자 예치가 필요합니다", run_id, r.bank_code, r.balance_after, cap,
                          extra={"bank_code": r.bank_code})
+            alerts.notify("overdue", f"정산 run {run_id} 확정 결과 은행 {r.bank_code}가 OVERDUE입니다 (잔액 {r.balance_after:,}원, "
+                          f"한도 {cap:,}원). 송금이 막혔습니다. 예치금 입금 또는 한도 상향이 필요합니다",
+                          run_id=run_id, bank_code=r.bank_code)
     logger.info("정산 run %s 확정 (%s%s): %s개 은행, %s건 %s원", run_id, confirmed_by,
                 f", 사유: {reason}" if reason else "", len(results), run.tx_count, run.total_amount)
     return run
 
 
 async def get_run(db: AsyncSession, run_id: int) -> SettlementRun:
-    """run과 포지션(은행 코드순)·쌍별 표. 없으면 404 SETTLEMENT_NOT_FOUND."""
+    """run과 포지션(은행 코드순)·쌍별 표·은행의 ack/dispute. 없으면 404 SETTLEMENT_NOT_FOUND."""
     stmt = (select(SettlementRun).where(SettlementRun.run_id == run_id)
-            .options(selectinload(SettlementRun.positions), selectinload(SettlementRun.pairs))
+            .options(selectinload(SettlementRun.positions), selectinload(SettlementRun.pairs),
+                     selectinload(SettlementRun.acks))
             .execution_options(populate_existing=True))
     if (run := await db.scalar(stmt)) is None:
         raise _not_found(run_id)
@@ -282,27 +289,31 @@ def bank_list_since(now: datetime | None = None) -> date:
     return today - timedelta(days=BANK_LIST_DAYS)
 
 
-async def list_for_bank(db: AsyncSession, bank_code: str, since: date,
-                        limit: int = BANK_LIST_LIMIT) -> list[tuple[SettlementRun, SettlementPosition | None]]:
-    """`since` 이후 정산일의 run과 그 run에서의 내 포지션(내 거래가 없으면 None), 최신순(run_id desc).
+async def list_for_bank(
+    db: AsyncSession, bank_code: str, since: date, limit: int = BANK_LIST_LIMIT,
+) -> list[tuple[SettlementRun, SettlementPosition | None, SettlementAck | None]]:
+    """`since` 이후 정산일의 run과 그 run에서의 내 포지션(내 거래가 없으면 None)·내 ack(안 보냈으면 None), 최신순(run_id desc).
 
     CANCELLED는 뺀다. 은행이 전에 본 DRAFT가 취소되면 목록에서 사라지고, 상세(`bank_view`)에서는 CANCELLED로 보인다.
-    포지션은 (run_id, bank_code)로 바깥 조인하므로 다른 은행의 행은 읽지 않는다."""
-    stmt = (select(SettlementRun, SettlementPosition)
+    포지션·ack는 (run_id, bank_code)로 바깥 조인하므로 다른 은행의 행은 읽지 않는다."""
+    stmt = (select(SettlementRun, SettlementPosition, SettlementAck)
             .outerjoin(SettlementPosition, (SettlementPosition.run_id == SettlementRun.run_id)
                        & (SettlementPosition.bank_code == bank_code))
+            .outerjoin(SettlementAck, (SettlementAck.run_id == SettlementRun.run_id)
+                       & (SettlementAck.bank_code == bank_code))
             .where(SettlementRun.settle_date >= since, SettlementRun.status != SettlementStatus.CANCELLED)
             .order_by(SettlementRun.run_id.desc()).limit(limit))
-    return [(run, position) for run, position in (await db.execute(stmt)).all()]
+    return [(run, position, ack) for run, position, ack in (await db.execute(stmt)).all()]
 
 
 @dataclass(frozen=True)
 class BankView:
-    """대사 파일 하나: run, 그 run에서의 내 포지션(없으면 None), 내가 보내거나 받은 거래(끝난 시각 순)."""
+    """대사 파일 하나: run, 그 run에서의 내 포지션(없으면 None), 내가 보내거나 받은 거래(끝난 시각 순), 내 ack(없으면 None)."""
 
     run: SettlementRun
     position: SettlementPosition | None
     transfers: list[Transfer]
+    ack: SettlementAck | None = None
 
 
 async def bank_view(db: AsyncSession, run_id: int, bank_code: str) -> BankView:
@@ -316,6 +327,7 @@ async def bank_view(db: AsyncSession, run_id: int, bank_code: str) -> BankView:
     if (run := await db.get(SettlementRun, run_id)) is None:
         raise _not_found(run_id)
     position = await db.get(SettlementPosition, (run_id, bank_code))
+    ack = await db.get(SettlementAck, (run_id, bank_code))
     transfers: list[Transfer] = []
     if run.status != SettlementStatus.CANCELLED:
         stmt = (select(Transfer)
@@ -323,4 +335,4 @@ async def bank_view(db: AsyncSession, run_id: int, bank_code: str) -> BankView:
                        (Transfer.from_bank == bank_code) | (Transfer.to_bank == bank_code))
                 .order_by(Transfer.finished_at, Transfer.transfer_id))
         transfers = list((await db.scalars(stmt)).all())
-    return BankView(run, position, transfers)
+    return BankView(run, position, transfers, ack)

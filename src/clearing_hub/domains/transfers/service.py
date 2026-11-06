@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clearing_hub.core import alerts
 from clearing_hub.core.auth import VerifiedRequest
 from clearing_hub.core.bank_client import BankClient, BankReply, bank_client
 from clearing_hub.core.config import get_settings
@@ -189,6 +190,9 @@ async def _confirm_one(db: AsyncSession, transfer: Transfer, client: BankClient)
         _set_status(db, transfer, TransferStatus.UNKNOWN, f"{transfer.retry_count}회 확인 실패, 관리자 확인 필요")
         logger.error("거래 %s 결과를 알 수 없음 (%s → %s)", transfer.transfer_id, transfer.from_bank, transfer.to_bank,
                      extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id})
+        alerts.notify("unknown", f"거래 결과를 알 수 없습니다 (UNKNOWN, {transfer.from_bank} → {transfer.to_bank}, "
+                      f"{transfer.amount:,}원, {transfer.retry_count}회 확인 실패). 받는 은행 확인 뒤 recheck 또는 resolve",
+                      transfer_id=transfer.transfer_id, bank_code=transfer.to_bank)
     return False
 
 

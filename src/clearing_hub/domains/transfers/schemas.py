@@ -35,6 +35,13 @@ class TransferRequest(BaseModel):
         return self
 
 
+class SelfTestRequest(BaseModel):
+    """POST /v1/test-receive 본문 (SPEC 3.7). 보내는 쪽 정보는 허브가 채운다 (가짜 은행 902, 시험 계좌)."""
+
+    to_account: str = Field(min_length=1, max_length=50, description="내 은행의 시험 받을 계좌")
+    amount: int = Field(ge=1, le=100_000, strict=True, description="정수, 원. 1~100,000")
+
+
 class TransferResolve(BaseModel):
     """관리자가 UNKNOWN 거래를 직접 확정한다. 받는 은행과 확인한 결과만 넣는다."""
 

@@ -1,4 +1,5 @@
-"""정산 배치: 8단계 수집·9단계 다자간 차액 계산(DRAFT), 11·12단계 확정·예치금 반영 (SETTLEMENT_PLAN 2절 2·3·4·7번, 5.1).
+"""정산 배치: 8단계 수집·9단계 다자간 차액 계산(DRAFT), 11·12단계 확정·예치금 반영 (SETTLEMENT_PLAN 2절 2·3·4·7번, 5.1),
+10단계 은행용 대사 파일 (`list_for_bank`·`bank_view`, 6.1, SPEC 10절).
 
 커밋은 하지 않는다. 라우터(`async with db.begin()`)나 워커(`workers/settlement.py`)가 트랜잭션을 정한다.
 예치금은 이 도메인이 직접 바꾸지 않는다. `confirm`이 지시서(`instruction_for`)를 `reserve.apply_instruction`에 넘긴다 (2절 1번).
@@ -6,6 +7,7 @@
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -265,3 +267,60 @@ def instruction_for(run: SettlementRun) -> list[tuple[str, int]]:
     `confirm`이 이것을 `reserve.apply_instruction(db, run.run_id, ...)`에 넘긴다. positions가 읽혀 있어야 한다
     (create_draft의 결과나 get_run)."""
     return [(p.bank_code, p.net_amount) for p in sorted(run.positions, key=lambda p: p.bank_code)]
+
+
+# --- 은행용 대사 API (SETTLEMENT_PLAN 6.1, 5.1의 10단계, SPEC 10절) --------------------------------------------------
+# 요청한 은행 자신의 몫만 돌려준다. 다른 은행의 포지션·잔액, 계좌번호·이름은 읽지도 않는다.
+
+BANK_LIST_DAYS = 30  # GET /v1/settlements: settle_date가 오늘(tz) − 30일 이후인 run만
+BANK_LIST_LIMIT = 100
+
+
+def bank_list_since(now: datetime | None = None) -> date:
+    """은행용 목록의 시작 정산일: 오늘(settlement_timezone) − 30일."""
+    today = (now or _now()).astimezone(ZoneInfo(get_settings().settlement_timezone)).date()
+    return today - timedelta(days=BANK_LIST_DAYS)
+
+
+async def list_for_bank(db: AsyncSession, bank_code: str, since: date,
+                        limit: int = BANK_LIST_LIMIT) -> list[tuple[SettlementRun, SettlementPosition | None]]:
+    """`since` 이후 정산일의 run과 그 run에서의 내 포지션(내 거래가 없으면 None), 최신순(run_id desc).
+
+    CANCELLED는 뺀다. 은행이 전에 본 DRAFT가 취소되면 목록에서 사라지고, 상세(`bank_view`)에서는 CANCELLED로 보인다.
+    포지션은 (run_id, bank_code)로 바깥 조인하므로 다른 은행의 행은 읽지 않는다."""
+    stmt = (select(SettlementRun, SettlementPosition)
+            .outerjoin(SettlementPosition, (SettlementPosition.run_id == SettlementRun.run_id)
+                       & (SettlementPosition.bank_code == bank_code))
+            .where(SettlementRun.settle_date >= since, SettlementRun.status != SettlementStatus.CANCELLED)
+            .order_by(SettlementRun.run_id.desc()).limit(limit))
+    return [(run, position) for run, position in (await db.execute(stmt)).all()]
+
+
+@dataclass(frozen=True)
+class BankView:
+    """대사 파일 하나: run, 그 run에서의 내 포지션(없으면 None), 내가 보내거나 받은 거래(끝난 시각 순)."""
+
+    run: SettlementRun
+    position: SettlementPosition | None
+    transfers: list[Transfer]
+
+
+async def bank_view(db: AsyncSession, run_id: int, bank_code: str) -> BankView:
+    """은행 `bank_code`에게 줄 대사 파일. 없는 run이면 404 SETTLEMENT_NOT_FOUND.
+
+    - 포지션: 그 run에 내 거래가 없으면 None (라우터가 0·null로 채운다). CANCELLED run도 기록된 값 그대로
+    - 거래: 그 run의 거래 중 `from_bank` 또는 `to_bank`가 나인 것. CANCELLED run은 빈 목록이다
+      (취소하면 거래의 settlement_run_id가 NULL로 돌아가 이미 비어 있지만, 다음 run에 들어간 거래를 여기서
+      보여 주지 않는다는 뜻을 분명히 하려고 따로 거른다)
+    """
+    if (run := await db.get(SettlementRun, run_id)) is None:
+        raise _not_found(run_id)
+    position = await db.get(SettlementPosition, (run_id, bank_code))
+    transfers: list[Transfer] = []
+    if run.status != SettlementStatus.CANCELLED:
+        stmt = (select(Transfer)
+                .where(Transfer.settlement_run_id == run_id,
+                       (Transfer.from_bank == bank_code) | (Transfer.to_bank == bank_code))
+                .order_by(Transfer.finished_at, Transfer.transfer_id))
+        transfers = list((await db.scalars(stmt)).all())
+    return BankView(run, position, transfers)

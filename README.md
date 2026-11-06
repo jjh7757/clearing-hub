@@ -23,7 +23,7 @@ src/clearing_hub/
 │   ├── accounts/           본인 명의 계좌 조회 (/v1/accounts/lookup), account_ref, 조회 기록 (/admin/account-lookups)
 │   ├── inquiry/            수취 조회 중계 (/v1/inquiry)
 │   ├── reserve/            예치금 원장(모의 당좌예금): 내 예치금 (/v1/reserve), 입출금·정정·분개 (/admin/reserve)
-│   ├── settlement/         정산 배치: 미정산 거래 수집·다자간 차액·쌍별 표·취소·CSV, 확정(예치금 반영) (/admin/settlements)
+│   ├── settlement/         정산 배치: 미정산 거래 수집·다자간 차액·쌍별 표·취소·CSV, 확정(예치금 반영) (/admin/settlements), 은행용 대사 파일 (/v1/settlements)
 │   └── transfers/          이체 접수(순채무한도 검사)·전달·상태 머신·결과 조회 (/v1/transfers), 관리 조회 (/admin/transfers)
 └── workers/
     ├── retry.py            미확인(PENDING) 거래 확인 태스크
@@ -103,6 +103,6 @@ docker logs clearing-hub 2>&1 | grep <request_id>
 ## 다음 단계
 
 - 관리자 JWT 로그인 (지금은 `ADMIN_TOKEN` 헤더), `hmac_secret` 암호화 저장
-- 정산(마감 상계 → 대사 → 예치금 결제): [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md). 1단계 예치금 원장(`reserve/`), 2단계 순채무한도(접수 때 `LIMIT_EXCEEDED`, `transfers/exposure.py`), 3단계 정산 DRAFT(수집·상계, `settlement/`), 4단계 확정·예치금 반영(`POST /admin/settlements/{run_id}/confirm`)·일일 워커(`workers/settlement.py`)까지 구현
+- 정산(마감 상계 → 대사 → 예치금 결제): [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md). 1단계 예치금 원장(`reserve/`), 2단계 순채무한도(접수 때 `LIMIT_EXCEEDED`, `transfers/exposure.py`), 3단계 정산 DRAFT(수집·상계, `settlement/`), 4단계 확정·예치금 반영(`POST /admin/settlements/{run_id}/confirm`)·일일 워커(`workers/settlement.py`), 5단계 은행용 대사 API(`GET /v1/settlements`, `/v1/settlements/{run_id}`)·SPEC v0.6(10절 정산)까지 구현
 - 관리 사이트(React)
 - AvengersBank에 허브 클라이언트와 `/interbank/*` 추가

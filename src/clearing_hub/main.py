@@ -16,6 +16,7 @@ from clearing_hub.domains.inquiry.router import router as inquiry_router
 from clearing_hub.domains.reserve.router import admin_router as reserve_admin_router
 from clearing_hub.domains.reserve.router import router as reserve_router
 from clearing_hub.domains.settlement.router import admin_router as settlement_admin_router
+from clearing_hub.domains.settlement.router import router as settlement_router
 from clearing_hub.domains.transfers.router import admin_router as transfer_admin_router
 from clearing_hub.domains.transfers.router import router as transfer_router
 from clearing_hub.workers.retry import retry_loop
@@ -47,6 +48,7 @@ app.include_router(inquiry_router)
 app.include_router(transfer_router)
 app.include_router(account_router)
 app.include_router(reserve_router)
+app.include_router(settlement_router)
 app.include_router(bank_admin_router)
 app.include_router(transfer_admin_router)
 app.include_router(account_admin_router)
@@ -56,4 +58,4 @@ app.include_router(settlement_admin_router)
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v0.5.2"}  # docs/SPEC.md 버전과 맞춘다
+    return {"service": "ClearingHub", "spec": "v0.6"}  # docs/SPEC.md 버전과 맞춘다

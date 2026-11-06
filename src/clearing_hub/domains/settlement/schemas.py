@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, Field
 
@@ -73,3 +73,55 @@ class SettlementTransferOut(BaseModel):
     amount: int
     finished_at: UtcDatetime
     holder_name: str | None
+
+
+# --- 은행용 대사 API (SETTLEMENT_PLAN 6.1, SPEC 10.4·10.5). 요청한 은행 자신의 몫만 담는다 -------------------------
+
+class BankSettlementOut(BaseModel):
+    """GET /v1/settlements 항목. net_amount·result는 요청한 은행의 것이다."""
+
+    run_id: int
+    settle_date: date
+    cutoff_at: UtcDatetime = Field(description="이 시각 전에 COMPLETED 된 미정산 거래까지 모았다")
+    status: str = Field(description="DRAFT / SETTLED (목록에는 CANCELLED가 나오지 않는다)")
+    settled_at: UtcDatetime | None = Field(description="확정 시각. DRAFT면 null")
+    net_amount: int = Field(description="내 포지션: 받을 돈 − 줄 돈. 그 run에 내 거래가 없으면 0")
+    result: str | None = Field(description="내 예치금 반영 결과 OK / OVERDRAWN / OVERDUE. 확정 전이거나 내 거래가 없으면 null")
+
+
+class BankSettlementList(BaseModel):
+    settlements: list[BankSettlementOut] = Field(description="최근 30일, 최신순(run_id 내림차순), 최대 100개")
+
+
+class BankPositionOut(BaseModel):
+    """대사 파일의 내 포지션. 그 run에 내 거래가 없으면 숫자는 0, result·balance_after는 null."""
+
+    sent_count: int = 0
+    sent_total: int = Field(default=0, description="내가 보낸 금액 합 (줄 돈)")
+    recv_count: int = 0
+    recv_total: int = Field(default=0, description="내가 받은 금액 합 (받을 돈)")
+    net_amount: int = Field(default=0, description="recv_total − sent_total. 양수면 내 예치금이 는다")
+    result: str | None = Field(default=None, description="OK / OVERDRAWN / OVERDUE (확정 뒤)")
+    balance_after: int | None = Field(default=None, description="반영 뒤 내 예치금 잔액 (확정 뒤)")
+
+
+class ReconTransferOut(BaseModel):
+    """대사 파일의 거래 한 줄. 계좌번호·이름은 넣지 않는다 (은행 자기 DB에 있다)."""
+
+    transfer_id: str
+    direction: Literal["SENT", "RECEIVED"] = Field(description="SENT: 내가 보냄, RECEIVED: 내가 받음")
+    counterparty_bank: str = Field(description="상대 은행 코드")
+    amount: int
+    finished_at: UtcDatetime
+
+
+class BankSettlementDetail(BaseModel):
+    """GET /v1/settlements/{run_id}: 대사 파일."""
+
+    run_id: int
+    settle_date: date
+    cutoff_at: UtcDatetime
+    status: str = Field(description="DRAFT / SETTLED / CANCELLED. CANCELLED면 무시한다 (거래는 다음 run에 다시 들어간다)")
+    settled_at: UtcDatetime | None
+    position: BankPositionOut
+    transfers: list[ReconTransferOut] = Field(description="그 run에서 내가 보내거나 받은 거래, 끝난 시각 순")

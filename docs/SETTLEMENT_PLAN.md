@@ -46,7 +46,7 @@
 | 1~7 | 수취조회·출금·입금 의뢰·입금·기록 | `transfers`, `inquiry`, `bank_client`, `workers/retry.py` | 있음 |
 | 8 | 하루치 거래 수집 | `settlement/service.py: create_draft()` — 미정산 `COMPLETED` 거래를 UPDATE 한 문장으로 모아 `settlement_run_id`를 찍는다 | 완료 (3단계) |
 | 9 | 다자간 차액 계산 | `settlement/service.py: create_draft()` → `settlement_positions`, `settlement_pairs`, 검증 Σ net = 0 | 완료 (3단계) |
-| 10 | 대사 파일 전달 | `GET /v1/settlements/{run_id}` (은행용, 5단계), `GET /admin/settlements/{run_id}/transfers.csv` (3단계 완료) | 일부 |
+| 10 | 대사 파일 전달 | `settlement/service.py: list_for_bank()`·`bank_view()` → `GET /v1/settlements`, `GET /v1/settlements/{run_id}` (은행용, 자기 몫만), `GET /admin/settlements/{run_id}/transfers.csv` (관리자용) | 완료 (5단계) |
 | 11 | 결제 지시 | `settlement/service.py: confirm()` → `reserve.service.apply_instruction(run_id, instruction_for(run))`, 일일 배치 `workers/settlement.py` | 완료 (4단계) |
 | 12 | 중앙은행 원장 반영 | `reserve/service.py: apply_instruction()` — `reserve_accounts.balance` 갱신 + `reserve_ledger` 분개, 결과를 `settlement_positions.result`·`balance_after`에 (한 트랜잭션) | 완료 (4단계) |
 | 13 | 은행 장부 정리 | AvengersBank `interbank/settlement_sync.py` — 대사 → `SETTLE` 분개 | 이 계획 |
@@ -226,11 +226,11 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
-| GET | `/v1/settlements` | 최근 30일 정산 목록: `run_id`, `settle_date`, `cutoff_at`, `status`, 내 `net_amount`, `result`. 한 날짜에 run이 여럿일 수 있다(취소된 run 포함) |
-| GET | `/v1/settlements/{run_id}` | **대사 파일.** 내 포지션(`sent_*`, `recv_*`, `net_amount`, `result`, `balance_after`) + 내가 보내거나 받은 거래 목록(`transfer_id`, 방향, 상대 은행, `amount`, `finished_at`). 없으면 404 `SETTLEMENT_NOT_FOUND` |
-| GET | `/v1/reserve` | 내 예치금: `balance`, `net_debit_cap`, `exposure`(4.4), `available = balance + cap − exposure` |
+| GET | `/v1/settlements` | `{"settlements": [...]}`. 최근 30일(`settle_date ≥ 오늘(tz) − 30일`) run, 최신순(`run_id` 내림차순), 최대 100개. 항목: `run_id`, `settle_date`, `cutoff_at`, `status`, `settled_at`, 내 `net_amount`(포지션이 없으면 0), 내 `result`(없으면 null). 한 날짜에 run이 여럿일 수 있다. **`CANCELLED`는 뺀다** (전에 본 DRAFT가 취소되면 목록에서 사라지고 상세에서 CANCELLED로 보인다) |
+| GET | `/v1/settlements/{run_id}` | **대사 파일.** `run_id`, `settle_date`, `cutoff_at`, `status`, `settled_at`, `position {sent_count, sent_total, recv_count, recv_total, net_amount, result, balance_after}`(내 행이 없으면 0·null), `transfers [{transfer_id, direction: SENT/RECEIVED, counterparty_bank, amount, finished_at}]`(내가 보내거나 받은 것만, `finished_at` 순. 계좌번호·이름 없음). CANCELLED run은 200, `transfers: []`, 포지션은 기록된 값. 없으면 404 `SETTLEMENT_NOT_FOUND` |
+| GET | `/v1/reserve` | 내 예치금: `bank_code`, `balance`, `net_debit_cap`, `exposure`(4.4), `available = balance + cap − exposure` |
 
-모두 2절 인증, 자기 은행 것만 본다. 다른 은행의 포지션·잔액은 보여 주지 않는다.
+모두 2절 인증(SPEC 2절 서명, 쿼리스트링 없음), 자기 은행 것만 본다. 다른 은행의 포지션·잔액은 보여 주지 않는다. 규격은 SPEC 10절.
 
 ### 6.2 관리자용
 
@@ -250,7 +250,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | GET | `/admin/reserve/{bank_code}/ledger` | 분개 목록 |
 | PATCH | `/admin/banks/{bank_code}` | 기존 API에 `net_debit_cap` 필드 추가 |
 
-### 6.3 SPEC 변경 (v0.6)
+### 6.3 SPEC 변경 (v0.6) — 반영됨 (v0.6, SPEC 10절)
 
 - 1절 상한 설명에 순채무한도 한 줄 추가 (`LIMIT_EXCEEDED`, `message`로 구분)
 - 새 절 **10. 정산**: 2절의 결정 3·4·6·7, 6.1의 API, 대사 파일 형식, 은행이 할 일(매일 대사, 맞지 않으면 허브 관리자에게 알림)
@@ -271,7 +271,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | 2. 순채무한도 검사 | 1일 | `transfers/service.py` 4.4 검사, 은행 등록 시 `reserve_accounts` 행 자동 생성 | 예치금 0·한도 0인 은행의 이체가 `LIMIT_EXCEEDED FAILED`로 거절되고, 예치금을 넣으면 된다. 기존 테스트는 conftest에서 한도를 넉넉히 줘 그대로 통과 |
 | 3. 정산 배치 (DRAFT) **완료** | 2일 | `domains/settlement/` models·service(`create_draft`·`cancel_draft`·`instruction_for`), Alembic `settlement_*`·`transfers.settlement_run_id`·`reserve_ledger.run_id` FK, `POST /admin/settlements/run`, 취소, 조회 API, CSV, `exposure`의 미정산 조건, `_set_status` 방어 | 손으로 계산한 하루치 상계와 같다. `Σ net = 0`. DRAFT가 있는데 또 돌리면 409, 취소하면 다시 돌릴 수 있다. 늦게 COMPLETED된 거래가 다음 정산에 들어간다 |
 | 4. 확정·예치금 반영 **완료** | 1.5일 | `confirm()` → `reserve.apply_instruction()`, `workers/settlement.py`(매일 자동 DRAFT, 설정 시 자동 확정, 시작 때 catch-up, 0건 run 자동 확정, `SETTLEMENT_WORKER_ENABLED`), `OVERDRAWN`·`OVERDUE` 처리, `POST /admin/settlements/{run_id}/confirm` | 확정 뒤 잔액이 포지션만큼 바뀌고 분개가 남는다. 두 번 확정 불가. `OVERDUE` 은행은 송금이 막히고 받기는 된다 |
-| 5. 은행용 대사 API | 1일 | `GET /v1/settlements`, `/v1/settlements/{run_id}` | 은행이 자기 거래만 본다. 다른 은행 포지션은 안 보인다 |
+| 5. 은행용 대사 API **완료** | 1일 | `GET /v1/settlements`, `/v1/settlements/{run_id}` (`service.list_for_bank`·`bank_view`), SPEC v0.6 10절 | 은행이 자기 거래만 본다. 다른 은행 포지션은 안 보인다 (S8, `tests/test_settlement_bank_api.py`) |
 | 6. AvengersBank 대사·정리 | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `settlement_reconciliations`, `settlement_sync.py` 워커, `hub_client.get_settlement()`, 관리자 조회 API 1개 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록을 일부러 하나 지우면 `MISMATCH`와 diff가 나온다 |
 | 7. 시연·문서 | 1일 | README·DEPLOY 갱신, 시연 대본(8절), 가짜 은행 `902` 예치금 시드 | 8절 시나리오가 끝까지 돈다 |
 | 8. 부인방지 | 3일 | 12절 전체: Ed25519 요청·응답 서명, 키 등록·회전, 전환 기간, 증거 보관, SPEC v1.0 | 허브가 은행 서명을 만들 수 없고, 받은 응답으로 상대의 "답한 사실"을 증명할 수 있다 |
@@ -303,7 +303,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | S5 | 확정 → 잔액·분개·`result` | 901 잔액 −7만, 902 +7만, SETTLE_DEBIT/CREDIT |
 | S6 | 확정 두 번 | 409, 잔액 그대로 |
 | S7 | 잔액 5만·한도 0인 은행이 net −7만 | `OVERDUE`, 그다음 이체가 `LIMIT_EXCEEDED`, 받기는 됨 |
-| S8 | 은행 API로 다른 은행 포지션 요청 | 자기 것만 나옴 |
+| S8 | 은행 API로 다른 은행 포지션 요청 | 자기 것만 나옴 (키 집합 검사, 계좌번호·이름 없음) |
 | S9 | 정산된 거래에 `_set_status` / `resolve_unknown` | `RuntimeError` / 불가 (UNKNOWN이 아니므로 기존 409) |
 | E1 | DRAFT 뒤·확정 뒤 순채무 (4.4) | DRAFT로는 순채무가 그대로, 확정 뒤 0이 되고 그만큼 예치금이 바뀐다. `available`은 그대로 |
 

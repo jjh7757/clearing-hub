@@ -5,20 +5,59 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from clearing_hub.core.auth import require_admin
+from clearing_hub.core.auth import current_bank, require_admin
 from clearing_hub.core.database import get_db
+from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.settlement import service
-from clearing_hub.domains.settlement.models import SettlementRun
+from clearing_hub.domains.settlement.models import SettlementPosition, SettlementRun
 from clearing_hub.domains.settlement.schemas import (
-    PairOut, PositionOut, SettlementConfirm, SettlementDetail, SettlementRunCreate, SettlementRunOut,
-    SettlementTransferOut,
+    BankPositionOut, BankSettlementDetail, BankSettlementList, BankSettlementOut, PairOut, PositionOut,
+    ReconTransferOut, SettlementConfirm, SettlementDetail, SettlementRunCreate, SettlementRunOut, SettlementTransferOut,
 )
 
-# 관리자용 정산 API (SETTLEMENT_PLAN 6.2). 은행용 대사 API(/v1/settlements)는 5단계
+# 은행용 대사 API (SETTLEMENT_PLAN 6.1, SPEC 10.4·10.5). 쿼리스트링 없이 부른다 (SPEC 2.2). 요청한 은행의 몫만 준다
+router = APIRouter(prefix="/v1/settlements", tags=["settlements"])
+# 관리자용 정산 API (SETTLEMENT_PLAN 6.2)
 admin_router = APIRouter(prefix="/admin/settlements", tags=["admin"], dependencies=[Depends(require_admin)])
 
 DB = Annotated[AsyncSession, Depends(get_db)]
+Me = Annotated[Bank, Depends(current_bank)]
 CSV_COLUMNS = ("transfer_id", "from_bank", "to_bank", "amount", "finished_at", "holder_name")
+
+
+def _my_position(position: SettlementPosition | None) -> BankPositionOut:
+    """내 포지션. 그 run에 내 거래가 없으면 행이 없으므로 0·null."""
+    return BankPositionOut() if position is None else BankPositionOut.model_validate(position, from_attributes=True)
+
+
+@router.get("", response_model=BankSettlementList)
+async def my_settlements(db: DB, bank: Me):
+    """내 정산 목록 (SPEC 10.4): 최근 30일 run, 최신순, 최대 100개. CANCELLED는 빠진다.
+    `net_amount`·`result`는 요청한 은행의 것이다 (그 run에 내 거래가 없으면 0·null)."""
+    rows = await service.list_for_bank(db, bank.bank_code, service.bank_list_since())
+    return BankSettlementList(settlements=[
+        BankSettlementOut(**SettlementRunOut.model_validate(run, from_attributes=True).model_dump(),
+                          net_amount=position.net_amount if position else 0,
+                          result=position.result if position else None)
+        for run, position in rows
+    ])
+
+
+@router.get("/{run_id}", response_model=BankSettlementDetail)
+async def my_settlement(run_id: int, db: DB, bank: Me):
+    """대사 파일 (SPEC 10.5): run 요약 + 내 포지션 + 그 run에서 내가 보내거나 받은 거래(끝난 시각 순).
+    다른 은행의 포지션, 계좌번호·이름은 넣지 않는다. 없는 run이면 404 SETTLEMENT_NOT_FOUND.
+    CANCELLED run은 200이고 `transfers`가 빈 목록이다 (포지션은 기록된 값)."""
+    view = await service.bank_view(db, run_id, bank.bank_code)
+    me = bank.bank_code
+    return BankSettlementDetail(
+        **SettlementRunOut.model_validate(view.run, from_attributes=True).model_dump(),
+        position=_my_position(view.position),
+        transfers=[ReconTransferOut(transfer_id=t.transfer_id, direction="SENT" if t.from_bank == me else "RECEIVED",
+                                    counterparty_bank=t.to_bank if t.from_bank == me else t.from_bank,
+                                    amount=t.amount, finished_at=t.finished_at)
+                   for t in view.transfers],
+    )
 
 
 def _detail(run: SettlementRun) -> SettlementDetail:

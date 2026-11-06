@@ -1,7 +1,7 @@
 # ClearingHub 정산 구현 계획서 — 상계·대사·예치금 결제
 
 - 작성일: 2026-11-06
-- 상태: **1~7단계 완료** (2026-11-06), 8단계(부인방지, 12절) 8a·8b·8c 완료, 8d(AvengersBank 정리) 남음. 9단계(자동 확정·셀프 시험·알림) 미착수. [PROJECT_PLAN.md](PROJECT_PLAN.md) 3.3절("정산은 표시만")과 [SPEC.md](SPEC.md) 8절 8번("정산 시각·방식, 미구현")을 이 문서로 대체한다
+- 상태: **1~7단계 완료** (2026-11-06), 8단계(부인방지, 12절) 8a~8d 완료. 9단계(자동 확정·셀프 시험·알림) 미착수. [PROJECT_PLAN.md](PROJECT_PLAN.md) 3.3절("정산은 표시만")과 [SPEC.md](SPEC.md) 8절 8번("정산 시각·방식, 미구현")을 이 문서로 대체한다
 - 범위: 실제 금융망의 이체 13단계 가운데 허브에 아직 없는 **8~13단계**(마감 상계 → 대사 → 중앙은행 정산 → 은행 장부 정리)를 ClearingHub와 AvengersBank에 구현한다(1~7단계). 이어서 **부인방지**(공개키 요청·응답 서명, 12절)를 8단계로 더한다
 - 전제: 서버는 하나(ClearingHub)지만 **장부는 둘**로 분리한다. 거래 기록(`transfers`)과 예치금 원장(`reserve_*`)은 서로 다른 도메인이 관리하고, 둘 사이는 "정산 지시서"로만 이어진다. 나중에 예치금 원장을 별도 서버(중앙은행 역할)로 떼어 내도 허브 쪽 코드는 그대로 두는 것이 목표다
 
@@ -51,7 +51,7 @@
 | 12 | 중앙은행 원장 반영 | `reserve/service.py: apply_instruction()` — `reserve_accounts.balance` 갱신 + `reserve_ledger` 분개, 결과를 `settlement_positions.result`·`balance_after`에 (한 트랜잭션) | 완료 (4단계) |
 | 13 | 은행 장부 정리 | AvengersBank `interbank/settlement_sync.py: sync_settlements()`·`reconcile_run()` — run 단위 대사 → `SETTLE` 분개(정산 계정 → `HUB_RESERVE`), 워커 `settlement_sync_loop()` | 완료 (6단계) |
 | (사전) | 당좌예금 예치, 순채무한도 | `reserve` 도메인, `banks.net_debit_cap`, `transfers.service.accept_and_deliver()` 검사(`transfers/exposure.py`) | 완료 (1·2단계) |
-| (신뢰) | 전자서명·부인방지 | 허브 `core/signing.py` Ed25519, 응답 서명(`core/response_signing.py`), `transfer_evidence` / AvengersBank `interbank/signing.py`·`response_signing.py`·`hub_evidence`·`keys.py` (12절, 8단계) | 완료 (8단계: 8a 허브·가짜 은행, 8b AvengersBank, 8c Ed25519 필수화·셀프 등록. 8d 남음) |
+| (신뢰) | 전자서명·부인방지 | 허브 `core/signing.py` Ed25519, 응답 서명(`core/response_signing.py`), `transfer_evidence` / AvengersBank `interbank/signing.py`·`response_signing.py`·`hub_evidence`·`keys.py` (12절, 8단계) | 완료 (8단계: 8a 허브·가짜 은행, 8b AvengersBank, 8c Ed25519 필수화·셀프 등록, 8d AvengersBank Ed25519 전용) |
 
 ---
 
@@ -290,7 +290,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | 5. 은행용 대사 API **완료** | 1일 | `GET /v1/settlements`, `/v1/settlements/{run_id}` (`service.list_for_bank`·`bank_view`), SPEC v0.6 10절 | 은행이 자기 거래만 본다. 다른 은행 포지션은 안 보인다 (S8, `tests/test_settlement_bank_api.py`) |
 | 6. AvengersBank 대사·정리 **완료** | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `interbank_ledger.hub_run_id`, `settlement_reconciliations`, `settlement_sync.py`·`settlement_sync_loop()` 워커, `hub_client.settlements()`·`settlement(run_id)`, `reconcile()`의 SETTLE·예치금 기대값. 관리자 조회 API는 AvengersBank에 관리자 인증이 없어 만들지 않음 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록에 우리에게 없는 거래가 있으면 `MISMATCH`와 diff가 나온다 (`tests/test_settlement_sync.py`) |
 | 7. 시연·문서 **완료** | 1일 | [DEMO.md](DEMO.md)(9절 대본, curl과 기대 숫자), `tests/test_demo_scenario.py`(9절 1~8을 허브 API로 끝까지), 가짜 은행 `…0006`(입금 없이 `200 COMPLETED`), DEPLOY "정산 배포 순서"(마이그레이션 → 재시작 → 은행마다 예치금·한도 → `/admin/reserve` 확인 → 개시 정산, `SETTLEMENT_*`), `902` 예치금은 시드 스크립트 대신 관리자 curl, PROJECT_PLAN·README·SPEC v0.6.1 | 9절 시나리오가 끝까지 돈다 (`uv run pytest tests/test_demo_scenario.py`) |
-| 8. 부인방지 **8a·8b·8c 완료, 8d 남음** | 3.5일 | 12절 전체: Ed25519 요청·응답 서명, 키 등록·회전, 증거 보관, SPEC v1.0 초안. 8a(허브·가짜 은행, HMAC과 공존) 완료, 8b(AvengersBank: `INTERBANK_SIGNATURE_MODE`·`INTERBANK_SIGNING_KEY`·`HUB_PUBLIC_KEY`, 응답 서명 미들웨어, `hub_evidence`, 키 도구, 마이그레이션 `c0d1e2f3a4b5`, `tests/test_nonrepudiation.py`) 완료. **8c(허브): Ed25519 필수화·HMAC 삭제, 초대 코드 셀프 등록, `/v1/me`, 기본 한도 10억, 마이그레이션 `f3b8d2a7c4e1`, SPEC v1.0 다시 씀, ONBOARDING.md** 완료(12.11). 8d(AvengersBank에서 HMAC·모드 걷어내기, 12.11 표) 남음 | 허브가 은행 서명을 만들 수 없고(허브 DB에 은행 비밀이 없다), 받은 응답으로 상대의 "답한 사실"을 증명할 수 있다 |
+| 8. 부인방지 **8a~8d 완료** | 3.5일 | 12절 전체: Ed25519 요청·응답 서명, 키 등록·회전, 증거 보관, SPEC v1.0 초안. 8a(허브·가짜 은행, HMAC과 공존) 완료, 8b(AvengersBank: `INTERBANK_SIGNATURE_MODE`·`INTERBANK_SIGNING_KEY`·`HUB_PUBLIC_KEY`, 응답 서명 미들웨어, `hub_evidence`, 키 도구, 마이그레이션 `c0d1e2f3a4b5`, `tests/test_nonrepudiation.py`) 완료. **8c(허브): Ed25519 필수화·HMAC 삭제, 초대 코드 셀프 등록, `/v1/me`, 기본 한도 10억, 마이그레이션 `f3b8d2a7c4e1`, SPEC v1.0 다시 씀, ONBOARDING.md** 완료(12.11). **8d(AvengersBank): HMAC·`HUB_SECRET`·`INTERBANK_SIGNATURE_MODE` 삭제, Ed25519 전용, 셀프 등록 도구 `keys register-bank`·`ping`·`status`(`/v1/me`)** 완료(12.7) | 허브가 은행 서명을 만들 수 없고(허브 DB에 은행 비밀이 없다), 받은 응답으로 상대의 "답한 사실"을 증명할 수 있다 |
 | 9. 관리자 손 줄이기 **미착수** | 2일 | 정산 자동 확정(은행이 대사 결과를 ack/dispute → 모두 ack면 확정, dispute면 관리자), 은행 셀프 시험 `POST /v1/me/test-receive`(허브가 그 은행에 소액 시험 입금을 보내 4.2·4.3을 확인), 알림 웹훅(OVERDUE·UNKNOWN·대사 불일치) | 관리자 일이 "초대 코드 보내기"와 dispute 판정만 남는다 (docs/ONBOARDING.md의 "곧 자동") |
 
 8단계는 돈의 흐름(1~7단계, 실제 금융망의 13단계)이 아니라 **신뢰 장치**다. 1~7과 독립이라 2단계 뒤 언제든 할 수 있지만, 규격이 깨지는 변경이라 다른 팀과 날짜를 맞춰야 한다 (12절). 8c에서 아직 연동한 팀이 없다는 점을 보고 전환 기간 없이 Ed25519만 남겼다 (12.11).
@@ -485,6 +485,7 @@ AvengersBank: `hub_evidence` 같은 표로 허브에서 받은 `/receive` 요청
 |---|---|---|
 | 8a 허브·가짜 은행 (2일) **완료** | `core/signing.py`에 Ed25519 서명·검증·응답 서명, `core/auth.py` 분기, `bank_client.py` 응답 검증, `core/response_signing.py`(응답 서명 미들웨어), banks 모델·API(`/v1/hub-key`, `/v1/keys`, 관리자 `public-key`·`signature-mode`), `transfer_evidence`(`transfers/evidence.py`, 관리자 `/evidence`), `bank_sim` Ed25519 검증·응답 서명(`SIM_SIGNATURE_MODE`·`SIM_HUB_PUBLIC_KEY`·`SIM_SIGNING_KEY`), Alembic `e5a1c7f3d9b2`, SPEC v1.0 초안 | 가짜 은행 `902`를 `both`·`ed25519`로 전환해도 기존 이체 시나리오 통과, `hmac`에서 기존 123개 그대로 통과. 응답 서명이 틀리면 PENDING → 4.3으로 COMPLETED (`tests/test_nonrepudiation.py`, K1은 `tests/test_signing.py`) |
 | 8b AvengersBank (1일) **완료** | `interbank/signing.py` Ed25519·응답 서명, `hub_client.py` 모드별 서명·허브 응답 서명 검증(`ed25519`에서 틀리면 "응답 없음" → PENDING), `router.py` `X-Signature-Alg` 분기·모드별 허용, `response_signing.py`(허브 것과 같은 순수 ASGI, 저장소 안에 따로), `hub_evidence`(`TRANSFER_OUT`·`TRANSFER_REPLY`·`RECEIVE_IN`·`RECEIVE_REPLY`, Alembic `c0d1e2f3a4b5`), 키 도구 `python -m avengers_bank.domains.interbank.keys generate·register·status·hub-key`, `.env` `INTERBANK_SIGNING_KEY`·`HUB_PUBLIC_KEY`·`INTERBANK_SIGNATURE_MODE`(허브가 정한 모드와 같게) | AvengersBank가 `ed25519` 모드로 가짜 허브와 왕복 이체·입금, `hmac` 기본에서 기존 테스트 그대로 (`tests/test_nonrepudiation.py`). 실제 허브와의 운영 전환은 아직 |
+| 8d AvengersBank Ed25519 전용 (2026-11-06) **완료** | 12.11 표대로: 설정 `HUB_SECRET`·`INTERBANK_SIGNATURE_MODE` 삭제, 타행 이체는 `HUB_URL`·`HUB_API_KEY`·`INTERBANK_SIGNING_KEY`·`HUB_PUBLIC_KEY` 넷이 있어야 켜짐(받는 쪽 `/interbank/*`는 두 키만 있으면 열림 — 셀프 등록 직후 ping용). `signing.py` HMAC 삭제, `hub_client.py` 늘 Ed25519·허브 응답 서명 늘 필수, `router.py` Ed25519만(서명 헤더 없음 401 `UNAUTHORIZED`). 키 도구 `register-bank`(셀프 등록, 서명 없이)·`ping`(`/v1/me/ping`)·`status`(`/v1/me`+`/v1/keys`)·`register`(회전만)·`hub-key`·`generate`. 마이그레이션 없음 | 가짜 허브가 Ed25519만 받고 응답에 서명하는 상태로 전체 테스트 통과, `register-bank`·`ping`은 가짜 허브가 실제로 우리 `/interbank/inquiry`를 불러 응답 서명까지 확인. 운영 전환은 AvengersBank `docs/DEPLOY.md` "Ed25519 전용 전환" (허브 DEPLOY "Ed25519 필수화 배포 순서"와 함께) |
 
 ### 12.8 테스트
 

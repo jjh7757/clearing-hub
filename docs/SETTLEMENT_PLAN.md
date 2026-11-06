@@ -49,7 +49,7 @@
 | 10 | 대사 파일 전달 | `settlement/service.py: list_for_bank()`·`bank_view()` → `GET /v1/settlements`, `GET /v1/settlements/{run_id}` (은행용, 자기 몫만), `GET /admin/settlements/{run_id}/transfers.csv` (관리자용) | 완료 (5단계) |
 | 11 | 결제 지시 | `settlement/service.py: confirm()` → `reserve.service.apply_instruction(run_id, instruction_for(run))`, 일일 배치 `workers/settlement.py` | 완료 (4단계) |
 | 12 | 중앙은행 원장 반영 | `reserve/service.py: apply_instruction()` — `reserve_accounts.balance` 갱신 + `reserve_ledger` 분개, 결과를 `settlement_positions.result`·`balance_after`에 (한 트랜잭션) | 완료 (4단계) |
-| 13 | 은행 장부 정리 | AvengersBank `interbank/settlement_sync.py` — 대사 → `SETTLE` 분개 | 이 계획 |
+| 13 | 은행 장부 정리 | AvengersBank `interbank/settlement_sync.py: sync_settlements()`·`reconcile_run()` — run 단위 대사 → `SETTLE` 분개(정산 계정 → `HUB_RESERVE`), 워커 `settlement_sync_loop()` | 완료 (6단계) |
 | (사전) | 당좌예금 예치, 순채무한도 | `reserve` 도메인, `banks.net_debit_cap`, `transfers.service.accept_and_deliver()` 검사 | 이 계획 |
 | (신뢰) | 전자서명·부인방지 | `core/signing.py` Ed25519, 응답 서명, `transfer_evidence` (12절, 8단계) | 이 계획 |
 
@@ -104,14 +104,18 @@ reserve_ledger             예치금 분개 (모든 변동의 근거)
 | `reserve_ledger` | `run_id`에 FK `settlement_runs.run_id` (3단계 마이그레이션) |
 | `banks` | `net_debit_cap` (bigint, 기본 0) |
 
-### 4.3 AvengersBank — 변경
+### 4.3 AvengersBank — 변경 (6단계 완료, 마이그레이션 `b9c0d1e2f3a4`)
+
+한 날짜에 run이 여럿일 수 있으므로(SPEC 10.3) 처음 계획의 `settle_date` 대신 **`run_id`를 키**로 쓴다.
 
 | 항목 | 변경 |
 |---|---|
-| `LedgerAccount` | `HUB_RESERVE = "HUB_RESERVE"` 추가: 우리가 허브에 맡긴 예치금 |
-| `LedgerEvent` | `SETTLE = "SETTLE"` 추가: 정산 계정 → 예치금 계정 |
-| `interbank_ledger` | `settle_date` (date nullable, index) 추가: 어느 날 정산에서 맞춰졌는지. NULL이면 미정산 |
-| 새 테이블 `settlement_reconciliations` | `settle_date` PK, `hub_run_id`, `hub_net_amount`, `our_net_amount`, `result` (`MATCHED` / `MISMATCH` / `HUB_UNAVAILABLE`), `diff_json`(안 맞는 `transfer_id` 목록), `checked_at` |
+| `LedgerAccount` | `HUB_RESERVE = "HUB_RESERVE"` 추가: 우리가 허브에 맡긴 모의 예치금. 은행별이 아니라 하나이고 `bank_code`는 허브 `"000"` |
+| `LedgerEvent` | `SETTLE = "SETTLE"` 추가: 정산 계정 → 예치금 계정. `transfer_id`는 `"settle:{run_id}:{은행}"` |
+| `interbank_ledger` | `hub_run_id` (int nullable, index) 추가: 이 줄이 맞춰진 허브 run. 맞춘 `COMPLETE`·`RECEIVE`의 정산 계정 줄은 장부 정리 때 찍고, `SETTLE` 줄은 처음부터 찍는다. NULL인 `COMPLETE`·`RECEIVE` 줄이 다음 대사의 후보 |
+| 새 테이블 `settlement_reconciliations` | `hub_run_id` PK, `settle_date`, `hub_status`(마지막으로 본 `DRAFT`/`SETTLED`), `hub_net_amount`(허브 `position.net_amount`), `our_net_amount`(일치한 거래로 계산한 같은 값), `result` (`MATCHED` / `CHECKING` / `MISMATCH`), `diff_json`(`hub_only`·`differs`·`checking`·`ours_only`·`ours_only_stale`·`net`, 빈 항목은 뺌), `checked_at`, `settled_at`(SETTLE 분개를 남긴 시각, nullable). 같은 run을 다시 보면 행을 갱신한다 |
+
+허브 응답 없음·401은 행을 남기지 않는다 (처음 계획의 `HUB_UNAVAILABLE` 대신 로그만 남기고 다음 주기에 다시). 취소된 run은 행을 남기지 않고, DRAFT 때 남긴 행은 지운다.
 
 ### 4.4 순채무(exposure) 계산
 
@@ -191,32 +195,44 @@ workers/settlement.py  매일 00:05 KST, 어제 정산일 (또는 POST /admin/se
 ### 5.3 은행 쪽 대사·장부 정리 (13단계, AvengersBank)
 
 ```
-interbank/settlement_sync.py   매일 00:30 KST (허브 배치 뒤)
- 1. GET /v1/settlements  (서명, SPEC 2절) → 아직 맞춰 보지 않은 run을 run_id 순으로
+interbank/worker.py: settlement_sync_loop()   시작 60초 뒤 한 번(꺼져 있던 동안 놓친 run), 그 뒤 1시간마다
+                                               (INTERBANK_SETTLEMENT_SYNC_STARTUP_DELAY_SECONDS / _INTERVAL_SECONDS)
+interbank/settlement_sync.py: sync_settlements()
+ 1. GET /v1/settlements  (서명, SPEC 2절) → 끝나지 않은 run을 run_id 오름차순으로
+      끝나지 않음 = 대사 행이 없음 / result ≠ MATCHED / MATCHED인데 settled_at 없음 (DRAFT 때 맞춰 봄)
+      목록에서 빠진 끝나지 않은 run(취소됐거나 30일 지남)도 상세로 다시 본다
+    - 응답 없음·401 등 → 로그만, 행 없음, 다음 주기에 다시
+    - 상세 404 → 그 run만 건너뜀 / 상세 응답 없음 → 이번 주기 중단
     GET /v1/settlements/{run_id}  (한 날짜에 run이 여럿일 수 있으므로 날짜가 아니라 run 단위로 대사한다)
-    - 새 run이 없음 → 허브가 아직 안 돌렸음. 1시간 뒤 다시 (최대 24회)
-    - DRAFT → 대사만 하고 SETTLE 분개는 하지 않음. SETTLED가 될 때까지 다시 확인
- 2. 우리 장부 계산: 허브가 준 transfer_id 목록을 **기준**으로 interbank_ledger에서
-    아직 정산 표시가 없는 COMPLETE(+)·RECEIVE(−) 분개를 찾아 은행별로 합산
-    (날짜로 자르지 않는다. 허브가 "미정산" 기준이라 며칠 전 거래가 들어올 수 있다)
-    → our_net_amount. 부호는 허브 규칙(받을 돈 − 줄 돈)으로 바꾼다.
-      INTERBANK_SETTLEMENT 계정은 "+ 줄 돈 / − 받을 돈"이므로 our_net = −(분개 합)
-    추가로 우리 장부에 정산 표시가 없는데 허브 목록에 없는 COMPLETE·RECEIVE 분개도 찾는다
- 3. 비교
-    - 포지션 합계가 같고, transfer_id 집합도 같음 → MATCHED
-    - 허브 목록의 ID가 우리 interbank_transfers에서 아직 PENDING이면 → 불일치가 아니라
-      "확인 중". 그 거래가 확정될 때까지 1시간 뒤 다시 (허브 202 뒤 결과 조회가 늦은 경우)
-    - 그 밖에 다르면 MISMATCH + diff_json(허브에만 있는 ID / 우리에게만 있는 ID / 금액 다른 ID)
-      logger.error, 자동 처리 중단, 관리자 확인
- 4. MATCHED이고 허브가 SETTLED이면 [트랜잭션]
-    은행별 SETTLE 분개: INTERBANK_SETTLEMENT −net, HUB_RESERVE +net
-    (transfer_id 대신 "settle:{date}:{bank}"를 키로 써서 두 번 기록 못 하게)
-    맞춘 COMPLETE·RECEIVE 분개에 settle_date를 표시해 다음 대사에서 다시 세지 않게 한다
-    (interbank_ledger에 settle_date 컬럼 추가, 4.3절)
- 5. settlement_reconciliations에 결과 저장
+ 2. reconcile_run(db, detail)   [한 트랜잭션, 대사 행 FOR UPDATE]
+    - CANCELLED → 아무것도 안 함. DRAFT 때 남긴 행은 지운다 (그 거래는 다음 run에 다시 나온다)
+    - 우리 쪽 후보: interbank_ledger에서 account = INTERBANK_SETTLEMENT, event ∈ {COMPLETE, RECEIVE},
+      hub_run_id IS NULL (다시 볼 때를 위해 = 이 run_id 도). COMPLETE(+) → SENT, RECEIVE(−) → RECEIVED
+      transfer_id → (방향, |amount|, 상대 은행, created_at). 날짜로 자르지 않는다
+ 3. 비교 (허브 transfers 각각을 transfer_id로)
+    - 방향·금액·상대 은행이 같음 → 일치
+    - 후보에 없는데 우리 interbank_transfers에서 PENDING(허브 SENT) → 확인 중 (checking)
+    - 후보에 없음 → hub_only (다른 run에서 이미 맞춘 거래면 settled_in) / 내용이 다름 → differs
+    - 우리 후보에만 있음 → 불일치가 아니다 (ours_only, 다음 run으로). 분개 created_at < cutoff_at − 1시간이면
+      ours_only_stale + logger.warning (SPEC 10.6 "내 쪽에만 있는 거래")
+    - our_net_amount = Σ 일치 RECEIVED − Σ 일치 SENT
+    - result: hub_only·differs가 있으면 MISMATCH (logger.error, 자동 처리 중단)
+              그다음 checking이 있으면 CHECKING
+              그다음 our_net ≠ position.net_amount면 MISMATCH (diff의 net)
+              아니면 MATCHED
+    - CHECKING이면 sync_settlements가 confirm_pending()으로 허브에 결과를 물어(SPEC 3.4) 마무리한 뒤 한 번 더 비교
+ 4. MATCHED이고 허브 SETTLED이고 settled_at이 없으면 [같은 트랜잭션]
+    맞춘 COMPLETE·RECEIVE 줄에 hub_run_id를 찍는다 (찍힌 수가 맞춘 수와 다르면 RuntimeError → 롤백)
+    상대 은행마다 n = Σ SENT − Σ RECEIVED (그 은행에 줄 돈, 받을 돈이면 음수, 0이면 분개 없음):
+      _post("settle:{run_id}:{bank}", SETTLE, bank, (INTERBANK_SETTLEMENT, −n), (HUB_RESERVE, −n), hub_run_id=run_id)
+    → HUB_RESERVE 변화 = Σ(−n) = position.net_amount. 유니크 (transfer_id, event, account)로 두 번 기록 못 한다
+    settled_at 기록. DRAFT면 행만 남기고 다음 주기에 SETTLED가 되면 4를 한다
+ 5. settlement_reconciliations에 결과 저장 (같은 run은 갱신)
 ```
 
-MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `COMPLETED`라고 답했거나(허브에만 있음), 보내는 은행이 출금 없이 보냈거나(우리 장부에 DEBIT 없음) 하면 여기서 드러난다.
+`interbank/service.py: reconcile()`(30초마다 내부 계정 대사)도 SETTLE을 안다: 은행별 정산 계정 기대값 = 완료 보낸 합 − 받은 합 + 그 은행 SETTLE 정산 계정 줄 합, `HUB_RESERVE` 기대값 = `settled_at`이 있는 대사 행의 `hub_net_amount` 합, 그리고 은행마다 `hub_run_id`가 찍힌 정산 계정 줄의 합 = 0.
+
+MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `COMPLETED`라고 답했거나(허브에만 있음), 보내는 은행이 출금 없이 보냈거나(우리 장부에 DEBIT 없음) 하면 여기서 드러난다. 운영자가 할 일은 AvengersBank `docs/INTERBANK.md`의 "정산 대사와 장부 정리".
 
 ---
 
@@ -272,7 +288,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | 3. 정산 배치 (DRAFT) **완료** | 2일 | `domains/settlement/` models·service(`create_draft`·`cancel_draft`·`instruction_for`), Alembic `settlement_*`·`transfers.settlement_run_id`·`reserve_ledger.run_id` FK, `POST /admin/settlements/run`, 취소, 조회 API, CSV, `exposure`의 미정산 조건, `_set_status` 방어 | 손으로 계산한 하루치 상계와 같다. `Σ net = 0`. DRAFT가 있는데 또 돌리면 409, 취소하면 다시 돌릴 수 있다. 늦게 COMPLETED된 거래가 다음 정산에 들어간다 |
 | 4. 확정·예치금 반영 **완료** | 1.5일 | `confirm()` → `reserve.apply_instruction()`, `workers/settlement.py`(매일 자동 DRAFT, 설정 시 자동 확정, 시작 때 catch-up, 0건 run 자동 확정, `SETTLEMENT_WORKER_ENABLED`), `OVERDRAWN`·`OVERDUE` 처리, `POST /admin/settlements/{run_id}/confirm` | 확정 뒤 잔액이 포지션만큼 바뀌고 분개가 남는다. 두 번 확정 불가. `OVERDUE` 은행은 송금이 막히고 받기는 된다 |
 | 5. 은행용 대사 API **완료** | 1일 | `GET /v1/settlements`, `/v1/settlements/{run_id}` (`service.list_for_bank`·`bank_view`), SPEC v0.6 10절 | 은행이 자기 거래만 본다. 다른 은행 포지션은 안 보인다 (S8, `tests/test_settlement_bank_api.py`) |
-| 6. AvengersBank 대사·정리 | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `settlement_reconciliations`, `settlement_sync.py` 워커, `hub_client.get_settlement()`, 관리자 조회 API 1개 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록을 일부러 하나 지우면 `MISMATCH`와 diff가 나온다 |
+| 6. AvengersBank 대사·정리 **완료** | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `interbank_ledger.hub_run_id`, `settlement_reconciliations`, `settlement_sync.py`·`settlement_sync_loop()` 워커, `hub_client.settlements()`·`settlement(run_id)`, `reconcile()`의 SETTLE·예치금 기대값. 관리자 조회 API는 AvengersBank에 관리자 인증이 없어 만들지 않음 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록에 우리에게 없는 거래가 있으면 `MISMATCH`와 diff가 나온다 (`tests/test_settlement_sync.py`) |
 | 7. 시연·문서 | 1일 | README·DEPLOY 갱신, 시연 대본(8절), 가짜 은행 `902` 예치금 시드 | 8절 시나리오가 끝까지 돈다 |
 | 8. 부인방지 | 3일 | 12절 전체: Ed25519 요청·응답 서명, 키 등록·회전, 전환 기간, 증거 보관, SPEC v1.0 | 허브가 은행 서명을 만들 수 없고, 받은 응답으로 상대의 "답한 사실"을 증명할 수 있다 |
 
@@ -311,11 +327,14 @@ AvengersBank `tests/test_settlement_sync.py`:
 
 | 번호 | 시험 | 기대 |
 |---|---|---|
-| B1 | 가짜 허브 응답 = 우리 장부 | `MATCHED`, `SETTLE` 분개 생성, 정산 계정 잔액 0 |
-| B2 | 같은 날짜 두 번 돌림 | 분개 한 번만 |
-| B3 | 허브 목록에 우리에게 없는 `transfer_id` | `MISMATCH`, diff에 그 ID, 분개 없음 |
-| B4 | 허브 DRAFT | 대사 기록만, 분개 없음 |
-| B5 | 허브 404 | `HUB_UNAVAILABLE`, 다음 주기에 다시 |
+| B1 | 가짜 허브 응답 = 우리 장부 (901 → 902 5만 2건, 902 → 901 3만 1건, SETTLED) | `MATCHED`, `SETTLE` 분개 생성, 정산 계정 잔액 0, `HUB_RESERVE` −7만 = `net_amount`, 맞춘 분개에 `hub_run_id`, `reconcile()` 정상 |
+| B2 | 같은 run 두 번 돌림 | 분개 한 번만, 대사 행 갱신만 |
+| B3 | 허브 목록에 우리에게 없는 `transfer_id` / 금액 다른 ID / 순액만 다름 | `MISMATCH`, diff에 `hub_only` / `differs` / `net`, 분개 없음 |
+| B4 | 허브 DRAFT → 같은 run이 SETTLED | DRAFT 때는 대사 기록만, SETTLED가 되면 그때 분개 |
+| B5 | 허브 응답 없음 / 401 | 행 없음, 다음 주기에 다시 (처음 계획의 `HUB_UNAVAILABLE` 행은 두지 않음) |
+| B6 | 허브 COMPLETED, 우리 PENDING | `CHECKING`, 분개 없음 → 허브 결과 확인 뒤 `MATCHED` |
+| B7 | 우리에게만 있는 거래 | `MATCHED`를 막지 않고 다음 run에서 맞춰짐. `cutoff_at − 1시간` 전 거래면 `ours_only_stale` 경고 |
+| B8 | 끝나지 않은 run 고르기 | `run_id` 오름차순, 끝난 run은 안 봄, 취소된 DRAFT는 대사 행 삭제 |
 
 ---
 

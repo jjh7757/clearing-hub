@@ -1,10 +1,8 @@
 """허브 → 은행 호출 (SPEC 4절). 서명을 붙이고, 타임아웃·오류를 하나의 결과 형태로 돌려준다.
 
-서명 방식은 받는 은행의 signature_mode로 정한다 (SETTLEMENT_PLAN 12.2 7번, SPEC 2.6):
-  hmac·both → HMAC으로 서명. 응답 서명은 요구하지 않는다 (있으면 검증해 signature_valid만 남긴다)
-  ed25519   → 허브 키(HUB_SIGNING_KEY)로 Ed25519 서명. 2xx·4xx 응답에 은행의 응답 서명(SPEC 2.5)이 **반드시** 있어야 하고,
-              없거나 틀리면 그 응답을 "응답 없음"으로 바꾼다. 2xx를 입금 완료로 믿지 않고 4.3 확인으로 넘긴다 (12.4).
-              FAILED로 끝내면 받는 은행이 실제로 입금했을 때 보내는 은행이 되돌려 이중 지급이 되기 때문이다
+허브는 모든 은행에 허브 키(HUB_SIGNING_KEY)로 Ed25519 서명한다 (SPEC 2절). 은행의 2xx·4xx 응답에는 응답 서명(SPEC 2.5)이
+**반드시** 있어야 하고, 없거나 틀리면 그 응답을 "응답 없음"으로 바꾼다. 2xx를 입금 완료로 믿지 않고 4.3 확인으로 넘긴다 (12.4).
+FAILED로 끝내면 받는 은행이 실제로 입금했을 때 보내는 은행이 되돌려 이중 지급이 되기 때문이다. 5xx는 서명을 요구하지 않는다
 """
 
 import asyncio
@@ -18,10 +16,10 @@ import httpx
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.request_id import REQUEST_ID_HEADER, get_request_id
 from clearing_hub.core.signing import (
-    ALG_ED25519, ALG_HEADER, ALG_HMAC, HUB_BANK_CODE, RESPONSE_SIGNATURE_HEADER, RESPONSE_TIMESTAMP_HEADER, sign,
-    sign_ed25519, verify_response,
+    ALG_ED25519, ALG_HEADER, HUB_BANK_CODE, RESPONSE_SIGNATURE_HEADER, RESPONSE_TIMESTAMP_HEADER, sign_ed25519,
+    verify_response,
 )
-from clearing_hub.domains.banks.models import Bank, SignatureMode
+from clearing_hub.domains.banks.models import Bank
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +47,9 @@ class Exchange:
 
 @dataclass
 class BankReply:
-    status: int | None  # None = 응답 없음(타임아웃·연결 실패, ed25519 모드에서 응답 서명이 없거나 틀림)
+    status: int | None  # None = 응답 없음(타임아웃·연결 실패, 2xx·4xx인데 응답 서명이 없거나 틀림)
     body: dict[str, Any]
-    # 응답 서명 검증 결과: True 맞음, False 없음·틀림(ed25519 모드에서만 요구), None 서명 없음(요구하지 않음)
+    # 응답 서명 검증 결과: True 맞음, False 없음·틀림, None 응답을 못 받음 또는 5xx(서명을 요구하지 않음)
     signature_valid: bool | None = None
     exchange: Exchange | None = None
 
@@ -99,27 +97,18 @@ def _pick(headers, names: tuple[str, ...]) -> dict[str, str]:
     return {name: headers[name] for name in names if headers.get(name) is not None}
 
 
-def _sign(bank: Bank, method: str, path: str, body: bytes) -> dict[str, str]:
-    """ed25519 모드 은행에는 허브 키로 Ed25519, 그 밖에는 HMAC. 어느 쪽이든 X-Signature-Alg를 붙인다
-    (HMAC 은행은 모르는 헤더를 무시하므로 바꿀 것이 없다, SPEC 1절)."""
-    if bank.signature_mode == SignatureMode.ED25519:
-        hub_key = get_settings().hub_signing_key
-        if hub_key is not None:
-            return sign_ed25519(hub_key.get_secret_value(), method, path, body)
-        # 전환 때 허브 키를 요구하므로(banks.service.set_signature_mode) 키를 지운 채 재시작한 경우뿐이다.
-        # HMAC으로 보내면 은행이 401로 거절해 입금 전 실패(FAILED)로 끝난다. 돈은 안전하다
-        logger.error("HUB_SIGNING_KEY가 없어 ed25519 모드 은행 %s에 HMAC으로 서명합니다", bank.bank_code,
-                     extra={"bank_code": bank.bank_code})
-    return {**sign(bank.hmac_secret, method, path, body), ALG_HEADER: ALG_HMAC}
+def _sign(method: str, path: str, body: bytes) -> dict[str, str]:
+    """허브 키로 Ed25519 서명 (SPEC 2.2). X-Signature-Alg: ed25519를 붙인다."""
+    return sign_ed25519(get_settings().hub_signing_key.get_secret_value(), method, path, body)
 
 
-def _check_reply_signature(bank: Bank, response: httpx.Response, request_signature: str) -> bool | None:
-    """은행 응답 서명(SPEC 2.5) 검증. 서명 헤더가 없으면 ed25519 모드에서만 False, 그 밖에는 None (요구하지 않음).
-    은행이 키를 교체한 직후일 수 있어 이전 키(24시간 안)로도 확인한다."""
+def _check_reply_signature(bank: Bank, response: httpx.Response, request_signature: str) -> bool:
+    """은행 응답 서명(SPEC 2.5) 검증. 은행이 키를 교체한 직후일 수 있어 이전 키(24시간 안)로도 확인한다.
+    공개키가 없는 은행(8c 전 등록)은 검증할 키가 없어 항상 False다."""
     timestamp = response.headers.get(RESPONSE_TIMESTAMP_HEADER)
     signature = response.headers.get(RESPONSE_SIGNATURE_HEADER)
     if not signature:
-        return False if bank.signature_mode == SignatureMode.ED25519 else None
+        return False
     if (response.headers.get(ALG_HEADER) or ALG_ED25519).strip().lower() != ALG_ED25519:
         return False
     skew = get_settings().signature_max_skew_seconds
@@ -142,13 +131,14 @@ class BankClient:
         return self._client
 
     async def _request(
-        self, bank: Bank, method: str, path: str, payload: dict | None = None, request_id: str | None = None
+        self, bank: Bank, method: str, path: str, payload: dict | None = None, request_id: str | None = None,
+        base_url: str | None = None,
     ) -> BankReply:
-        url = bank.base_url.rstrip("/") + path
+        url = (base_url or bank.base_url).rstrip("/") + path
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode() if payload is not None else b""
         # 서명 경로는 base_url 뒤의 부분이다 (SPEC 2.2). 은행 앞단 프록시가 경로를 바꿔도 맞게 하기 위해서다
         headers = {"X-Bank-Code": HUB_BANK_CODE, "Content-Type": "application/json; charset=utf-8",
-                   **_sign(bank, method, path, body)}
+                   **_sign(method, path, body)}
         # 추적 ID (SPEC 2.4): 거래에 저장된 값 > 지금 요청의 값. 재시도 태스크처럼 요청 밖이면 저장된 값만 쓴다
         request_id = request_id or get_request_id()
         if request_id:
@@ -167,8 +157,8 @@ class BankClient:
         exchange.response_status = response.status_code
         exchange.response_headers = _pick(response.headers, REPLY_EVIDENCE_HEADERS)
         exchange.response_body = response.content
-        signature_valid = _check_reply_signature(bank, response, headers["X-Signature"])
-        if bank.signature_mode == SignatureMode.ED25519 and response.status_code < 500 and not signature_valid:
+        signature_valid = None if response.status_code >= 500 else _check_reply_signature(bank, response, headers["X-Signature"])
+        if signature_valid is False:
             # 서명 없는·틀린 응답은 그 은행이 답했다고 증명할 수 없다. 2xx라도 입금 완료로 믿지 않는다 (12.4).
             # 5xx는 본문 보장이 없어(SPEC 5절) 서명을 요구하지 않고 그대로 5xx(재시도)로 본다
             logger.error("은행 %s 응답 서명 검증 실패: %s %s HTTP %s → 응답 없음으로 처리", bank.bank_code, method, path,
@@ -180,8 +170,10 @@ class BankClient:
             data = {}
         return BankReply(response.status_code, data if isinstance(data, dict) else {}, signature_valid, exchange)
 
-    async def inquiry(self, bank: Bank, account_num: str, request_id: str | None = None) -> BankReply:
-        return await self._request(bank, "POST", "/inquiry", {"account_num": account_num}, request_id)
+    async def inquiry(self, bank: Bank, account_num: str, request_id: str | None = None,
+                      base_url: str | None = None) -> BankReply:
+        """base_url을 주면 등록된 주소 대신 그 주소로 부른다 (PATCH /v1/me가 새 주소를 반영하기 전에 ping할 때)."""
+        return await self._request(bank, "POST", "/inquiry", {"account_num": account_num}, request_id, base_url)
 
     async def receive(self, bank: Bank, payload: dict, request_id: str | None = None) -> BankReply:
         return await self._request(bank, "POST", "/receive", payload, request_id)

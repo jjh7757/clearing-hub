@@ -20,18 +20,22 @@ class Settings(BaseSettings):
     settlement_cutoff_time: str = Field(default="00:05", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")  # 매일 마감 배치 시각 (HH:MM)
     settlement_timezone: str = "Asia/Seoul"  # 정산일·마감 시각의 기준 시간대
     settlement_auto_confirm: bool = False  # true면 DRAFT를 대사 없이 바로 확정 (시연용)
-    # 부인방지 (SETTLEMENT_PLAN 12절, SPEC 2.3·2.5·2.6). 허브 Ed25519 개인키(raw 32바이트 base64).
-    # 없으면 허브는 Ed25519로 보내지도(ed25519 모드 전환 불가, HUB_KEY_MISSING) 응답에 서명하지도 못한다. 받는 것(both)은 된다
-    hub_signing_key: SecretStr | None = None
+    # 부인방지 (SETTLEMENT_PLAN 12절, SPEC 2절). 허브 Ed25519 개인키(raw 32바이트 base64, 44자). **필수**:
+    # 허브는 모든 은행 호출에 이 키로 서명하고 /v1 응답에도 서명한다. 없거나 형식이 틀리면 서버가 시작하지 않는다
+    hub_signing_key: SecretStr
     previous_key_ttl_seconds: int = Field(default=86400, gt=0)  # 은행 공개키 교체 뒤 이전 키를 받아 주는 시간 (12.2 8번)
+    # 셀프 등록·기본 한도 (SETTLEMENT_PLAN 12.11, SPEC 3.5·7절·10.2)
+    invite_ttl_days: int = Field(default=7, gt=0)  # 초대 코드 유효 기간
+    bank_code_start: str = Field(default="903", pattern=r"^\d{3}$")  # 셀프 등록 때 이 코드부터 비어 있는 가장 작은 코드를 준다
+    default_net_debit_cap: int = Field(default=1_000_000_000, ge=0)  # 새 은행의 순채무한도(원). 등록 직후부터 보낼 수 있게
 
     @field_validator("hub_signing_key", mode="before")
     @classmethod
     def _check_hub_key(cls, value):
-        """빈 값은 키 없음. 형식이 틀린 키는 서버 시작 때 바로 알린다 (첫 이체에서 터지지 않게)."""
+        """빈 값·형식이 틀린 키는 서버 시작 때 바로 알린다 (첫 이체에서 터지지 않게)."""
         raw = value.get_secret_value() if isinstance(value, SecretStr) else value
         if raw is None or not str(raw).strip():
-            return None
+            raise ValueError("HUB_SIGNING_KEY(허브 Ed25519 개인키)가 필요합니다. docs/DEPLOY.md '허브 키 만들기'")
         from clearing_hub.core.signing import public_key_of  # signing이 config를 import하지 않으므로 순환 없음
 
         public_key_of(str(raw).strip())  # 틀리면 ValueError → 설정 오류

@@ -82,7 +82,7 @@ class TransferEvidence(Base):
     http_status: Mapped[int | None] = mapped_column(Integer)  # 응답만
     headers_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     body: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    signature_alg: Mapped[str | None] = mapped_column(String(10))  # hmac | ed25519 | None(서명 없음)
+    signature_alg: Mapped[str | None] = mapped_column(String(10))  # ed25519 | None(서명 없음). 8c 전 행에는 hmac이 있을 수 있다
     # 받을 때 검증 결과. 허브가 보낸 요청(RECEIVE_OUT)은 허브가 서명했으므로 None. 응답 서명이 없고 요구하지도 않으면 None
     signature_valid: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

@@ -40,14 +40,14 @@ async def inquiry(
         return InquiryResponse(**data.model_dump(), holder_name=str(reply.body["holder_name"]))
     if reply.auth_failed:
         # 받는 은행이 허브 서명을 거절: 보내는 은행에 401을 그대로 넘기면 자기 서명이 틀린 줄 안다
-        logger.error("은행 %s가 허브 인증을 거절 (HTTP %s %s). secret 설정 확인 필요",
+        logger.error("은행 %s가 허브 인증을 거절 (HTTP %s %s). 그 은행의 허브 공개키 설정 확인 필요",
                      receiver.bank_code, reply.status, reply.body.get("error"), extra={"bank_code": receiver.bank_code})
         raise ApiException(502, "RECEIVER_ERROR", reply.message or "받는 은행에 일시 장애가 있습니다")
     if reply.rejected:
         # HTTP 상태는 받는 은행이 준 값이 아니라 그 코드의 SPEC 5절 상태로 (예: ACCOUNT_NOT_FOUND 404)
         raise ApiException(spec_http_status(reply.error), reply.error, reply.message or "받는 은행이 조회를 거절했습니다")
     # 5xx·타임아웃은 받는 은행의 오류 코드를 그대로 넘기지 않고 허브 코드로 바꾼다 (SPEC 3.2).
-    # ed25519 모드 은행의 응답 서명이 틀리면 응답은 왔으므로 타임아웃이 아니라 RECEIVER_ERROR (SETTLEMENT_PLAN 12.4)
+    # 받는 은행의 응답 서명이 없거나 틀리면 응답은 왔으므로 타임아웃이 아니라 RECEIVER_ERROR (SETTLEMENT_PLAN 12.4)
     if reply.status is None and reply.signature_valid is not False:
         raise ApiException(504, "RECEIVER_TIMEOUT", "받는 은행이 응답하지 않습니다")
     raise ApiException(502, "RECEIVER_ERROR", "받는 은행에 일시 장애가 있습니다")

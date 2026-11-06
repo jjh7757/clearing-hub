@@ -14,7 +14,7 @@ from clearing_hub.core.config import get_settings
 from clearing_hub.core.database import SessionLocal
 from clearing_hub.domains.accounts.models import AccountLookup, AccountRef
 from clearing_hub.domains.accounts.service import mask_account, purge_expired
-from tests.conftest import ADMIN, register_bank
+from tests.conftest import ADMIN, SIM_PRIVATE_KEY, register_bank
 
 pytestmark = pytest.mark.anyio
 
@@ -45,7 +45,8 @@ def test_mask_account():
 
 async def test_lookup_then_transfer_by_ref(client, banks):
     sender, _ = banks
-    await register_bank(client, "903", "NoLookupBank", "http://sim/none")  # 9.4가 없는 은행
+    # 9.4가 없는 은행: 가짜 은행의 없는 경로라 서명된 404 (응답 서명은 가짜 은행 키로, SPEC 2.5)
+    await register_bank(client, "903", "NoLookupBank", "http://sim/interbank/none", private_key=SIM_PRIVATE_KEY)
     res = await sender.post("/v1/accounts/lookup", lookup_body())
     assert res.status_code == 200, res.text
     data = res.json()

@@ -71,7 +71,7 @@ C은행 ────────┘   ├ banks      참가 은행 등록·키 �
 |---|---|---|
 | 서버 | Python 3.13, FastAPI, SQLAlchemy(async), Alembic, PostgreSQL | AvengersBank와 같은 스택. 익숙하고 코드를 가져올 수 있음 |
 | 은행 호출 | httpx (AsyncClient), 타임아웃·재시도 | 은행 서버가 느리거나 죽어도 허브는 멈추지 않음 |
-| 인증 | 은행: API 키 + HMAC-SHA256 요청 서명 / 관리자: JWT | 2.5절 |
+| 인증 | 은행: API 키(식별) + Ed25519 요청·응답 서명 (SPEC v1.0, 허브는 은행 비밀을 갖지 않는다) / 관리자: JWT | 2.5절 |
 | 배치 | APScheduler 또는 lifespan 안의 asyncio 태스크 | 재시도 1분, 정산 하루 1회 |
 | 관리 사이트 | React (Vite), TypeScript | AvengersBank 프론트와 같은 구성 |
 | 시뮬레이터 | 같은 저장소의 작은 FastAPI 앱 (`bank_sim/`) | 성공·계좌 없음·지연·오류를 계좌번호로 골라 재현 |
@@ -94,7 +94,7 @@ C은행 ────────┘   ├ banks      참가 은행 등록·키 �
 
 | 테이블 | 용도 | 주요 컬럼 |
 |---|---|---|
-| `banks` | 참가 은행 | bank_code PK, name, base_url(은행의 `/interbank` 주소), api_key_hash, hmac_secret(암호화), active, net_debit_cap(순채무한도), created_at |
+| `banks` | 참가 은행 | bank_code PK, name, base_url(은행의 `/interbank` 주소), api_key_hash, public_key(Ed25519, SPEC v1.0. 처음 계획의 hmac_secret은 8c에서 지움), active, net_debit_cap(순채무한도), created_at |
 | `transfers` | 중계한 이체 | transfer_id PK(은행이 준 UUID), from_bank FK, from_account, to_bank FK, to_account, amount, sender_name, memo, status, fail_code, fail_message, requested_at, delivered_at, finished_at, retry_count, settlement_run_id(정산에 들어갔으면 그 run, 그 뒤로 상태 변경 금지) |
 | `transfer_events` | 상태 변경 이력 (감사용) | event_id PK, transfer_id FK, from_status, to_status, detail, created_at |
 | `inquiries` | 수취 조회 기록 (선택, 통계용) | inquiry_id PK, from_bank, to_bank, to_account, result, created_at |
@@ -112,7 +112,7 @@ C은행 ────────┘   ├ banks      참가 은행 등록·키 �
 | 장치 | 내용 |
 |---|---|
 | 은행별 API 키 | 허브가 발급. 요청 헤더 `X-Bank-Code`, `X-Api-Key`. 해시로 저장 |
-| 요청 서명 | 헤더 `X-Timestamp`, `X-Signature = HMAC-SHA256(secret, timestamp + "\n" + METHOD + "\n" + PATH + "\n" + body)` (PATH는 SPEC 2.2의 규격 경로). 시각 차이 5분 초과면 거절 (재전송 공격 방지). 허브 → 은행 호출도 같은 방식으로 서명 |
+| 요청 서명 | 헤더 `X-Timestamp`, `X-Signature = base64(Ed25519(보내는 쪽 개인키, timestamp + "\n" + METHOD + "\n" + PATH + "\n" + body))` (PATH는 SPEC 2.2의 규격 경로. 처음 계획의 HMAC은 SPEC v1.0에서 Ed25519로 바꿈). 시각 차이 5분 초과면 거절 (재전송 공격 방지). 허브 → 은행 호출은 허브 키로 서명하고, 응답에도 서명한다 (SPEC 2.5) |
 | 멱등성 | 같은 `transfer_id`가 다시 오면 처리하지 않고 저장된 결과를 돌려준다. 은행도 `/interbank/receive`에서 같은 규칙 |
 | 사칭 방지 | `from_bank`는 요청 본문이 아니라 인증된 `X-Bank-Code`로 정한다 |
 | 관리자 | JWT 로그인. 관리 API는 `/admin/*`로 분리 |
@@ -289,7 +289,7 @@ AvengersBank처럼 router → service → repository 계층과 `domains/*` 5개 
 | 다른 팀 서버가 규격을 안 지키거나 늦음 | 연동 시연 불가 | 규격을 먼저 확정해 전달, 시뮬레이터로 시연 가능하게 유지, "연결 상태 확인" 버튼으로 어느 쪽 문제인지 바로 확인 |
 | 받는 은행 응답 없음 | 돈 유실·이중 입금 | `transfer_id` 멱등 + PENDING 상태 + 결과 조회 재시도. 테스트로 `0005` 경우를 증명 |
 | 허브가 죽음 | 모든 타행 이체 중단 | 은행은 PENDING으로 두고 되돌리지 않음. 허브 재시작 시 `DELIVERING`·`PENDING` 거래를 이어서 확인 |
-| 은행 키 유출 | 사칭 이체 요청 | HMAC 서명 + 시각 검사, 키 재발급 기능, 은행 비활성화 |
+| 은행 키 유출 | 사칭 이체 요청 | Ed25519 서명 + 시각 검사, 키 회전(`PUT /v1/keys`), 은행 비활성화 |
 | 서명 방식 구현 차이 (팀마다 바이트 순서·인코딩) | 연동 실패 | SPEC에 서명 예시(입력·결과)를 넣고, 시뮬레이터 코드를 참고 구현으로 제공 |
 | 시각 동기화 | 서명 시각 검사 실패 | 허용 오차 5분, 오류 메시지에 서버 시각 포함 |
 | 인원 미정 | 일정 불확실 | 4절 우선순위대로 핵심(1·2·5)부터 |

@@ -1,19 +1,10 @@
 from datetime import UTC, datetime
-from enum import StrEnum
 
-from sqlalchemy import BigInteger, Boolean, DateTime, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from clearing_hub.core.database import Base
 from clearing_hub.core.signing import fingerprint
-
-
-class SignatureMode(StrEnum):
-    """서명 전환 모드 (SETTLEMENT_PLAN 12.2 7번, SPEC 2.6). 관리자만 바꾼다. 공개키를 등록해도 저절로 바뀌지 않는다."""
-
-    HMAC = "hmac"  # 은행 → 허브 HMAC만, 허브 → 은행 HMAC, 응답 서명 요구 없음 (기본, 기존 은행)
-    BOTH = "both"  # 은행 → 허브 HMAC·Ed25519 둘 다, 허브 → 은행은 아직 HMAC. 은행이 보내는 쪽부터 바꿔 보는 기간
-    ED25519 = "ed25519"  # 양방향 Ed25519만, 은행 응답에 응답 서명 필수 (없거나 틀리면 "응답 없음")
 
 
 class Bank(Base):
@@ -22,15 +13,13 @@ class Bank(Base):
     bank_code: Mapped[str] = mapped_column(String(3), primary_key=True)
     name: Mapped[str] = mapped_column(String(50), nullable=False)
     base_url: Mapped[str] = mapped_column(String(300), nullable=False)  # 예: https://b-bank.example.com/interbank
-    api_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    # 서명 비밀키. 허브가 은행을 부를 때 서명해야 하므로 해시로 둘 수 없다. 다음 단계: Fernet 암호화
-    hmac_secret: Mapped[str] = mapped_column(String(100), nullable=False)
+    api_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)  # X-Api-Key는 식별용. 서명은 공개키로 검증한다
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # 순채무한도(원): 예치금보다 이만큼 더 보낼 수 있다. 담보·일중당좌대출 역할 (SETTLEMENT_PLAN 2절 6번)
     net_debit_cap: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    # 부인방지 (SETTLEMENT_PLAN 12.3). 공개키만 받는다 (개인키는 은행만 갖는다). HMAC secret과는 따로 바뀐다
-    signature_mode: Mapped[str] = mapped_column(String(10), default=SignatureMode.HMAC, server_default="hmac", nullable=False)
+    # 부인방지 (SETTLEMENT_PLAN 12.3·12.11). 공개키만 받는다 (개인키는 은행만 갖는다). 허브는 은행의 비밀을 하나도 갖지 않는다.
+    # 새 은행은 등록 때 반드시 넣는다. NULL은 8c 전에 등록된 은행뿐이며, 그 은행은 등록하기 전까지 401·PUBLIC_KEY_MISSING
     public_key: Mapped[str | None] = mapped_column(String(44))  # Ed25519 raw 32바이트 base64
     previous_public_key: Mapped[str | None] = mapped_column(String(44))  # 교체 전 키. previous_key_expires_at까지 받는다
     previous_key_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -49,3 +38,16 @@ class Bank(Base):
             if expires > (now or datetime.now(UTC)):
                 keys.append(self.previous_public_key)
         return keys
+
+
+class Invite(Base):
+    """셀프 등록 초대 코드 (SETTLEMENT_PLAN 12.11, SPEC 3.5). 관리자가 팀마다 하나 발급하고, 은행이 한 번 쓴다."""
+
+    __tablename__ = "invites"
+
+    code: Mapped[str] = mapped_column(String(40), primary_key=True)  # inv_ + token_urlsafe(16)
+    note: Mapped[str] = mapped_column(String(100), nullable=False, default="", server_default="")  # 팀 이름 등 관리자 메모
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    used_by_bank_code: Mapped[str | None] = mapped_column(String(3), ForeignKey("banks.bank_code"))

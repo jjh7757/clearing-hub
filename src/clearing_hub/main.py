@@ -12,6 +12,7 @@ from clearing_hub.core.response_signing import ResponseSigningMiddleware
 from clearing_hub.domains.accounts.router import admin_router as account_admin_router
 from clearing_hub.domains.accounts.router import router as account_router
 from clearing_hub.domains.banks.router import admin_router as bank_admin_router
+from clearing_hub.domains.banks.router import invite_admin_router
 from clearing_hub.domains.banks.router import keys_router
 from clearing_hub.domains.banks.router import router as bank_router
 from clearing_hub.domains.inquiry.router import router as inquiry_router
@@ -45,9 +46,8 @@ configure_logging()  # JSON 로그, 모든 줄에 request_id (SPEC 2.4)
 app = FastAPI(title="ClearingHub", lifespan=lifespan)
 
 
-def _hub_signing_key() -> str | None:
-    key = get_settings().hub_signing_key
-    return key.get_secret_value() if key is not None else None
+def _hub_signing_key() -> str:
+    return get_settings().hub_signing_key.get_secret_value()  # 필수 설정 (core/config.py)
 
 
 # 나중에 더한 미들웨어가 바깥이다: RequestId가 가장 바깥이어야 처리하지 못한 500에도 X-Request-ID가 붙는다
@@ -62,6 +62,7 @@ app.include_router(account_router)
 app.include_router(reserve_router)
 app.include_router(settlement_router)
 app.include_router(bank_admin_router)
+app.include_router(invite_admin_router)
 app.include_router(transfer_admin_router)
 app.include_router(account_admin_router)
 app.include_router(reserve_admin_router)

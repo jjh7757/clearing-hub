@@ -11,6 +11,7 @@ from clearing_hub.core.bank_client import BankClient, BankReply
 from clearing_hub.core.database import SessionLocal
 from clearing_hub.domains.banks import service as bank_service
 from clearing_hub.domains.transfers.models import Transfer
+from clearing_hub.core.signing import generate_keypair
 from tests.conftest import transfer_payload
 
 pytestmark = pytest.mark.anyio
@@ -19,10 +20,10 @@ SPEC_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
 async def test_receiver_auth_error_is_not_passed_as_sender_signature_error(banks, monkeypatch):
-    """허브에 받는 은행 secret이 잘못 등록된 상황: 받는 은행이 허브 서명을 401로 거절한다.
+    """받는 은행이 허브 공개키를 잘못 가진 상황: 받는 은행이 허브 서명을 (서명된) 401로 거절한다.
     보내는 은행에는 자기 서명 오류(401 SIGNATURE_INVALID)처럼 보이면 안 된다 (SPEC 3.2, 5절)."""
     sender, _ = banks
-    monkeypatch.setenv("SIM_HUB_SECRET", "not-the-secret-the-hub-uses")
+    monkeypatch.setenv("SIM_HUB_PUBLIC_KEY", generate_keypair()[1])
 
     res = await sender.post("/v1/inquiry", {"to_bank": "902", "to_account": "110-123-0001"})
     assert res.status_code == 502 and res.json()["error"] == "RECEIVER_ERROR"

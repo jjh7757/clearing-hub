@@ -59,14 +59,14 @@ def _apply_reply(db: AsyncSession, transfer: Transfer, reply: BankReply, *, no_a
         # 4xx는 재시도하지 않는다 (SPEC 4.2 규칙 5). 받는 은행 인증 거절(401·403)은 입금 전이라 실패로 끝내고
         # 보내는 은행이 출금을 되돌리게 한다. 코드는 RECEIVER_ERROR로 바꿔 보낸다 (BankReply.error)
         if reply.auth_failed:
-            logger.error("은행 %s가 허브 인증을 거절 (HTTP %s %s). secret 설정 확인 필요", transfer.to_bank, reply.status,
+            logger.error("은행 %s가 허브 인증을 거절 (HTTP %s %s). 그 은행의 허브 공개키 설정 확인 필요", transfer.to_bank, reply.status,
                          reply.body.get("error"), extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id,
                                                           "bank_code": transfer.to_bank})
         transfer.fail_code = reply.error
         transfer.fail_message = (reply.message or "받는 은행이 거절했습니다")[:200]
         _set_status(db, transfer, TransferStatus.FAILED, f"{transfer.fail_code}: {transfer.fail_message}")
     elif reply.signature_valid is False:
-        # ed25519 모드 은행의 응답 서명이 없거나 틀림: 응답 없음과 같이 4.3 확인으로 넘긴다 (SETTLEMENT_PLAN 12.4)
+        # 받는 은행의 응답 서명이 없거나 틀림: 응답 없음과 같이 4.3 확인으로 넘긴다 (SETTLEMENT_PLAN 12.4)
         _set_status(db, transfer, no_answer_status, "응답 서명 검증 실패 (응답 없음으로 처리)")
     else:
         _set_status(db, transfer, no_answer_status, f"응답 없음 (HTTP {reply.status})")

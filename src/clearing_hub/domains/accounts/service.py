@@ -40,6 +40,8 @@ def mask_account(account_num: str) -> str:
 
 def _classify(reply: BankReply) -> tuple[str, list[dict]]:
     """은행 응답 → (result, 정상 계좌 목록). 형식이 틀린 항목은 버린다."""
+    if reply.signature_valid is False:  # 응답은 왔지만 응답 서명이 없거나 틀림 (SPEC 2.5)
+        return "ERROR", []
     if reply.status is None:
         return "TIMEOUT", []
     if reply.status == 404:

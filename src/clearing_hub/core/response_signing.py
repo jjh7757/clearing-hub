@@ -3,8 +3,8 @@
 message = X-Response-Timestamp + "\\n" + STATUS + "\\n" + 요청의 X-Signature 값 + "\\n" + 응답 본문 바이트
 헤더   = X-Response-Timestamp, X-Response-Signature, X-Signature-Alg: ed25519
 
-- 허브: `/v1/*`의 2xx·4xx 응답에 허브 키(HUB_SIGNING_KEY)가 있으면 은행의 모드와 상관없이 붙인다. 검증할지는 받는 은행 몫이다.
-- 가짜 은행(bank_sim): 같은 클래스로 `/interbank/*` 응답에 자기 키로 붙인다.
+- 허브: `/v1/*`의 2xx·4xx 응답에 허브 키(HUB_SIGNING_KEY, 필수)로 항상 붙인다. 은행은 3.3 응답 등을 허브 공개키로 검증한다.
+- 가짜 은행(bank_sim): 같은 클래스로 `/interbank/*` 응답에 자기 키(SIM_SIGNING_KEY)로 붙인다.
 - 5xx는 붙이지 않는다 (본문 보장이 없다, SPEC 5절). 본문은 한 바이트도 바꾸지 않는다.
 - 본문을 다 모아야 서명할 수 있으므로, 여러 조각으로 나오는 스트리밍 응답은 서명 없이 그대로 흘려보낸다.
   이 프로젝트의 API 응답은 모두 한 조각(JSONResponse)이다.
@@ -21,7 +21,7 @@ from clearing_hub.core.signing import sign_response
 class ResponseSigningMiddleware:
     def __init__(self, app: ASGIApp, key_getter: Callable[[], str | None], path_prefix: str) -> None:
         self.app = app
-        self.key_getter = key_getter  # 개인키 base64. 요청마다 읽는다 (없으면 서명하지 않음)
+        self.key_getter = key_getter  # 개인키 base64. 요청마다 읽는다 (없으면 서명하지 않음: 테스트에서 "서명 없는 응답"을 만들 때)
         self.path_prefix = path_prefix
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

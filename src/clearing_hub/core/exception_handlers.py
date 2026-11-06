@@ -26,7 +26,8 @@ def spec_http_status(code: str) -> int:
 
 
 async def api_exception_handler(request: Request, exc: ApiException) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content=error_body(exc.code, exc.message, exc.transfer_id))
+    return JSONResponse(status_code=exc.status_code,
+                        content={**error_body(exc.code, exc.message, exc.transfer_id), **exc.extra})
 
 
 async def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:

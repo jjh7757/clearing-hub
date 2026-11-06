@@ -2,12 +2,14 @@
 
 
 class ApiException(Exception):
-    def __init__(self, status_code: int, code: str, message: str, transfer_id: str | None = None):
+    def __init__(self, status_code: int, code: str, message: str, transfer_id: str | None = None,
+                 extra: dict | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.transfer_id = transfer_id
+        self.extra = extra or {}  # 본문에 더 붙일 필드 (관리자 API용, 예: 정산 409의 run_id)
 
 
 class Unauthorized(ApiException):

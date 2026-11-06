@@ -11,7 +11,7 @@ from clearing_hub.domains.reserve import service as reserve
 from clearing_hub.domains.reserve.models import PositionStatus
 from clearing_hub.domains.transfers.exposure import open_exposure
 from clearing_hub.domains.transfers.models import Transfer, TransferStatus
-from tests.conftest import ADMIN, GENEROUS_CAP, set_net_debit_cap, transfer_payload
+from tests.conftest import ADMIN, GENEROUS_CAP, send_902_to_901, set_net_debit_cap, transfer_payload
 
 pytestmark = pytest.mark.anyio
 
@@ -47,20 +47,6 @@ def _assert_cap_rejected(res) -> None:
     body = res.json()
     assert body["error"] == "LIMIT_EXCEEDED" and body["status"] == "FAILED"  # 보내는 은행은 출금을 되돌린다
     assert "순채무한도" in body["message"]
-
-
-async def _send_902_to_901(sender, receiver, monkeypatch, amount: int) -> dict:
-    """902 → 901 이체를 허브 API로 만든다. 901의 base_url도 bank_sim이라, 이때만 bank_sim이 901의 secret으로
-    허브 서명을 검증하게 바꾼다. 902는 한도를 넉넉히 준다."""
-    await set_net_debit_cap(sender.client, "902", GENEROUS_CAP)
-    payload = {**transfer_payload("110-123-0001", amount=amount), "to_bank": "901"}
-    monkeypatch.setenv("SIM_HUB_SECRET", sender.secret)
-    try:
-        res = await receiver.post("/v1/transfers", payload)
-    finally:
-        monkeypatch.setenv("SIM_HUB_SECRET", receiver.secret)
-    assert res.status_code == 200 and res.json()["status"] == "COMPLETED", res.text
-    return payload
 
 
 async def test_n1_no_reserve_no_cap_is_rejected(client, banks):
@@ -108,7 +94,7 @@ async def test_n2_pending_counts_as_exposure(client, banks):
 async def test_n3_received_completed_raises_room(client, banks, monkeypatch):
     """N3: 902가 901에게 COMPLETED로 10만 보냈으면 901은 예치금·한도 0이어도 그만큼 더 보낼 수 있다."""
     sender, receiver = banks
-    await _send_902_to_901(sender, receiver, monkeypatch, 100_000)
+    await send_902_to_901(sender, receiver, monkeypatch, 100_000)
     assert await _exposure("901") == -100_000 and await _exposure("902") == 100_000
     assert (await _reserve(sender))["available"] == 100_000
 
@@ -189,7 +175,7 @@ async def test_s7_overdue_bank_cannot_send_but_receives(client, banks, monkeypat
     _assert_cap_rejected(res)
     assert "예치금 -20,000원" in res.json()["message"]
 
-    payload = await _send_902_to_901(sender, receiver, monkeypatch, 10_000)  # 받는 쪽으로는 입금된다
+    payload = await send_902_to_901(sender, receiver, monkeypatch, 10_000)  # 받는 쪽으로는 입금된다
     assert payload["transfer_id"] in sim.received
     _assert_cap_rejected(await sender.post("/v1/transfers", transfer_payload("110-123-0001", amount=10_000)))
 

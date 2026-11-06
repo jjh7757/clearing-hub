@@ -12,6 +12,7 @@ from clearing_hub.core.database import Base
 from clearing_hub.domains.accounts.models import AccountLookup, AccountRef  # noqa: F401
 from clearing_hub.domains.banks.models import Bank  # noqa: F401
 from clearing_hub.domains.reserve.models import ReserveAccount, ReserveLedgerEntry  # noqa: F401
+from clearing_hub.domains.settlement.models import SettlementPair, SettlementPosition, SettlementRun  # noqa: F401
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent  # noqa: F401
 
 config = context.config

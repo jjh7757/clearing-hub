@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from clearing_hub.core.database import Base
@@ -18,6 +18,11 @@ class TransferStatus(StrEnum):
 
 class Transfer(Base):
     __tablename__ = "transfers"
+    # 미정산 순채무 계산(transfers/exposure.py)과 정산 수집용 (SETTLEMENT_PLAN 4.2, 10절)
+    __table_args__ = (
+        Index("ix_transfers_from_bank_settlement", "from_bank", "settlement_run_id"),
+        Index("ix_transfers_to_bank_settlement", "to_bank", "settlement_run_id"),
+    )
 
     transfer_id: Mapped[str] = mapped_column(String(36), primary_key=True)  # 보내는 은행이 만든 UUID (멱등성 키)
     from_bank: Mapped[str] = mapped_column(ForeignKey("banks.bank_code"), index=True, nullable=False)
@@ -36,6 +41,9 @@ class Transfer(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 받는 은행에 처음 보낸 시각
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # COMPLETED/FAILED 확정 시각
+    # 이 거래를 모은 정산 회차 (SETTLEMENT_PLAN 4.2). 채워지면 상태를 바꾸지 않는다 (2절 8번, service._set_status).
+    # DRAFT를 취소하면 NULL로 돌아간다
+    settlement_run_id: Mapped[int | None] = mapped_column(ForeignKey("settlement_runs.run_id"))
 
 
 class TransferEvent(Base):

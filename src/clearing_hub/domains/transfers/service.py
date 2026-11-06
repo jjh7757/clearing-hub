@@ -30,6 +30,10 @@ def _now() -> datetime:
 
 
 def _set_status(db: AsyncSession, transfer: Transfer, status: TransferStatus, detail: str | None = None) -> None:
+    # 정산에 들어간 거래는 바꾸지 않는다 (결제완결성, SETTLEMENT_PLAN 2절 8번). 정정은 예치금 ADJUST 분개로만.
+    # 정산 대상은 COMPLETED뿐이고 COMPLETED에서 나가는 전이는 없으므로, 여기 걸리면 호출한 쪽의 버그다
+    if transfer.settlement_run_id is not None:
+        raise RuntimeError(f"정산된 거래는 상태를 바꿀 수 없습니다 ({transfer.transfer_id}, run {transfer.settlement_run_id})")
     db.add(TransferEvent(transfer_id=transfer.transfer_id, from_status=transfer.status, to_status=status, detail=detail))
     transfer.status = status
     if status in FINAL:

@@ -104,4 +104,18 @@ def transfer_payload(to_account: str, transfer_id: str | None = None, amount: in
             "from_account": "110-200-456789", "amount": amount, "sender_name": "홍길동", "memo": "생활비"}
 
 
+async def send_902_to_901(sender, receiver, monkeypatch, amount: int) -> dict:
+    """902 → 901 이체를 허브 API로 만든다. 901의 base_url도 bank_sim이라, 이때만 bank_sim이 901의 secret으로
+    허브 서명을 검증하게 바꾼다. 902는 한도를 넉넉히 준다."""
+    await set_net_debit_cap(sender.client, "902", GENEROUS_CAP)
+    payload = {**transfer_payload("110-123-0001", amount=amount), "to_bank": "901"}
+    monkeypatch.setenv("SIM_HUB_SECRET", sender.secret)
+    try:
+        res = await receiver.post("/v1/transfers", payload)
+    finally:
+        monkeypatch.setenv("SIM_HUB_SECRET", receiver.secret)
+    assert res.status_code == 200 and res.json()["status"] == "COMPLETED", res.text
+    return payload
+
+
 __all__ = ["BankClient"]

@@ -54,9 +54,8 @@ class ReserveLedgerEntry(Base):
     bank_code: Mapped[str] = mapped_column(ForeignKey("banks.bank_code"), index=True, nullable=False)
     kind: Mapped[str] = mapped_column(String(20), nullable=False)  # ReserveLedgerKind
     amount: Mapped[int] = mapped_column(BigInteger, nullable=False)  # 잔액 증감. WITHDRAW·SETTLE_DEBIT는 음수
-    # 정산 회차 (SETTLE_*만). settlement_runs 테이블은 3단계에서 생기므로 지금은 FK가 없다.
-    # TODO 3단계: ForeignKey("settlement_runs.run_id")를 붙이는 마이그레이션
-    run_id: Mapped[int | None] = mapped_column(Integer)
+    # 정산 회차 (SETTLE_*만). FK는 테이블 이름으로만 건다: 이 도메인은 settlement 모델을 import하지 않는다 (2절 1번)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("settlement_runs.run_id"))
     balance_after: Mapped[int] = mapped_column(BigInteger, nullable=False)  # 이 분개를 반영한 뒤 잔액
     memo: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     created_by: Mapped[str] = mapped_column(String(50), nullable=False)  # "admin" / "settlement"

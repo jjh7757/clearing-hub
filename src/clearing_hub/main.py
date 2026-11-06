@@ -14,6 +14,7 @@ from clearing_hub.domains.banks.router import router as bank_router
 from clearing_hub.domains.inquiry.router import router as inquiry_router
 from clearing_hub.domains.reserve.router import admin_router as reserve_admin_router
 from clearing_hub.domains.reserve.router import router as reserve_router
+from clearing_hub.domains.settlement.router import admin_router as settlement_admin_router
 from clearing_hub.domains.transfers.router import admin_router as transfer_admin_router
 from clearing_hub.domains.transfers.router import router as transfer_router
 from clearing_hub.workers.retry import retry_loop
@@ -44,6 +45,7 @@ app.include_router(bank_admin_router)
 app.include_router(transfer_admin_router)
 app.include_router(account_admin_router)
 app.include_router(reserve_admin_router)
+app.include_router(settlement_admin_router)
 
 
 @app.get("/")

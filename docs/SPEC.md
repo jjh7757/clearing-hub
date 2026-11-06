@@ -1,4 +1,4 @@
-# ClearingHub 참가 은행 연동 규격 v1.2.2 (초안)
+# ClearingHub 참가 은행 연동 규격 v1.2.3 (초안)
 
 - 작성일: 2026-11-05 (최종 수정 2026-11-06)
 - 대상: ClearingHub(은행 간 이체 중계 서버)에 참가하려는 은행 서버 개발팀
@@ -908,7 +908,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | 필드 | 타입 | 필수 | 규칙 |
 |---|---|---|---|
 | `invite_code` | 문자열 | 필수 | 허브 관리자가 준 값. 한 번만 쓸 수 있고, 발급 후 7일이 지나면 만료 |
-| `name` | 문자열 | 필수 | 1~50자. 다른 은행 화면에 받는 은행 이름으로 나온다 |
+| `name` | 문자열 | 필수 | 1~50자. 다른 은행 화면에 받는 은행 이름으로, 거래내역에 보낸 은행 이름으로 나온다. **참가 은행 사이에서 유일**해야 한다 (공백·대소문자를 무시하고 비교: `Avengers Bank`와 `avengersbank`는 같은 이름). 이미 있으면 `BANK_NAME_TAKEN` |
 | `base_url` | 문자열 | 필수 | 4절 API의 기준 주소. 허브 서버에서 접근할 수 있는 **공개 HTTPS**, 공인 인증서 (자체 서명 불가). 끝의 `/`는 떼고 저장한다 |
 | `public_key` | 문자열 | 필수 | Ed25519 공개키, raw 32바이트의 base64(44자) (2.6) |
 
@@ -942,6 +942,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 |---|---|---|
 | `INVITE_INVALID` | 400 | 초대 코드가 없거나, 만료됐거나, 이미 쓰였다. 허브 관리자에게 새 코드를 요청한다 |
 | `BANK_EXISTS` | 409 | 같은 `base_url`로 등록된 은행이 이미 있다 (같은 서버를 두 번 등록하지 않는다). 초대 코드는 쓰이지 않은 채로 남는다 |
+| `BANK_NAME_TAKEN` | 409 | 같은 이름(공백·대소문자 무시)의 은행이 이미 있다. `message`에 그 은행 코드. 다른 이름으로 다시 보낸다. 초대 코드는 쓰이지 않은 채로 남는다 |
 | `VALIDATION_ERROR` | 422 | 위 필드 표 위반 (`public_key` 형식 포함). 초대 코드는 쓰이지 않은 채로 남는다 |
 | `BANK_CODE_EXHAUSTED` | 409 | 배정할 은행 코드가 없음 (허브 관리자에게 알린다) |
 
@@ -962,6 +963,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 ```
 
 - `base_url`을 바꾸면 허브가 **새 주소로 먼저 ping**한다. 정상(`ok: true`)일 때만 반영하고, 아니면 `400 PING_FAILED`와 그 결과를 돌려준다 (이름도 바꾸지 않는다). 새 서버를 먼저 띄우고 바꾼다.
+- `name`은 다른 은행과 겹칠 수 없다 (3.5와 같은 규칙). 겹치면 `409 BANK_NAME_TAKEN`이고 아무것도 바뀌지 않는다.
   ```json
   { "error": "PING_FAILED", "message": "새 base_url이 정상으로 응답하지 않아 바꾸지 않았습니다 (ping 확인)", "ping": { "ok": false, … } }
   ```
@@ -1255,6 +1257,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `PUBLIC_KEY_MISSING` | 400 | 받는 은행의 공개키가 허브에 없음. 수취 조회·이체 모두 접수 전에 거절(이체는 `status: "FAILED"`)한다. 허브가 그 은행의 응답 서명을 검증할 수 없기 때문이다 (2.5). v1.0 전에 등록된 은행에만 생긴다 | 허브 |
 | `INVITE_INVALID` | 400 | 셀프 등록의 초대 코드가 없거나 만료됐거나 이미 쓰임 (3.5) | 허브 |
 | `BANK_EXISTS` | 409 | 같은 `base_url`로 등록된 은행이 이미 있음 (3.5) | 허브 |
+| `BANK_NAME_TAKEN` | 409 | 같은 이름(공백·대소문자 무시)의 은행이 이미 있음. 등록(3.5)과 이름 변경(3.6 `PATCH /v1/me`) 모두 | 허브 |
 | `BANK_CODE_EXHAUSTED` | 409 | 셀프 등록에 배정할 은행 코드가 없음 (3.5) | 허브 |
 | `PING_FAILED` | 400 | `PATCH /v1/me`의 새 `base_url`이 ping에 정상으로 답하지 않음. 본문에 `ping` 결과가 붙는다 (3.6) | 허브 |
 | `NOT_FOUND` | 404 | 없는 경로 (주소 오타) | 허브 |
@@ -1873,3 +1876,4 @@ v1.0 확정 전에 참가 팀과 정한 것들이다. **6번만 미정**이고 �
 | 1.2 (초안) | 2026-11-06 | **연동 진단** (1.1과 호환: 은행 → 허브 API 하나와 오류 본문의 선택 필드만 더했다. 서명·4절은 그대로). 새 3.8 `GET /v1/diagnose/failures`: 서명 없이 `X-Bank-Code`·`X-Api-Key`로 식별, 읽기 전용, 내 실패만. 허브가 인증 실패(내 요청의 401, 내 서버의 401·403·응답 서명 오류)를 기록하고, 실패한 서명을 흔한 실수 변형으로 다시 계산해 원인 가설(`verified`, `spec_ref`, `fix`)을 준다. 5절: 식별된 은행의 401 본문에 선택 필드 `hint`(1순위 가설 한 줄). 3절 API 표, 7절 8(401이 나면: `hint` → `/v1/diagnose/failures` → 관리자), 8절 22, 체크리스트. 루트 `/` 응답 `v1.2` |
 | 1.2.1 (초안) | 2026-11-06 | **문서만** (허브·은행 동작은 1.2와 같다. 루트 `/`의 `spec`도 `v1.2` 그대로). 맨 앞에 **빠른 시작**(키 → 서명 함수 → 받는 쪽 최소 구현 → 셀프 등록 → 902로 보내기 → 셀프 시험 → 401일 때, 코드는 허브 테스트가 실행해 확인). 모든 절 제목에 [필수]·[선택]·[알아야 함]. 8절 "합의가 필요한 것"을 **부록 A 합의 기록**으로 옮겨 결정만 남김(본문의 "8절 n" → "부록 A n", 6번만 미정). 10.7·10.8의 순서를 바로잡음: 대사 결과 보내기(ack·dispute)가 **10.7**, 한계가 **10.8** (1.1·1.2 판의 "10.8"은 지금의 10.7). 2.3·2.5 참고 구현에 시각 인자(`ts`), 다른 언어의 raw 키 → DER 안내. 7절 9 참고 구현 목록(`examples/README.md`). 로컬 개발 서버(`python -m clearing_hub.devserver`) 안내 |
 | 1.2.2 (초안) | 2026-11-06 | **문서와 진단 안내 문구** (허브·은행 동작은 1.2와 같다. 루트 `/`의 `spec`도 `v1.2` 그대로). SPEC만 보고 Node.js 은행을 만든 팀의 빈틈 보고(`examples/node-bank/SPEC_FEEDBACK.md`) 반영. 셀프 시험 `/status`의 404는 허브 응답(200)이 아니라 `receiver_reply.status`라는 점(빠른 시작 6단계, 3.7, 7절 7). ping·셀프 시험 실패에는 `hint`가 없고 `GET /v1/diagnose/failures`의 `HUB_TO_BANK`를 본다, 그 `reason` 값(3.8, 빠른 시작 4·7단계). 허브 지문은 받은 `hub_public_key`로 직접 계산하고 응답 서명도 그 키로 검증(`hub_fingerprint`는 참고용, 빠른 시작 0·4단계, 3.5, 7절 4). Node.js 안내: 키 만들기·DER 읽기(빠른 시작 1·2단계), base64 형식·길이 검사, Express 받는 쪽 상자(원본 바이트·`res.end` 응답 서명·`req.path`, 3단계), `fetch`는 `arrayBuffer()`로 받아 검증(5단계), `X-Timestamp`는 `Math.floor(Date.now() / 1000)`(2.1), `JSON.stringify`가 예시 1의 바이트(2.3). 받는 쪽 401 코드 나누기 주석(3단계), 4.2 규칙 2의 `INSERT … ON CONFLICT DO NOTHING RETURNING` 예. 6단계 확인을 "내 서버 로그·DB에서 1건"으로. 7절 9에 `examples/node-bank` 링크. 허브: 연동 진단 PATH 가설의 `fix`가 실패한 실제 경로를 예로 들고 "서명 함수에 넘기는 PATH"로 쓴다(언어별 함수 이름을 쓰지 않음) |
+| 1.2.3 (초안) | 2026-11-06 | **은행 이름 유일** (새 오류 하나. 루트 `/`의 `spec`은 `v1.2` 그대로). 3.5·3.6: `name`은 참가 은행 사이에서 유일해야 하며(공백·대소문자 무시) 겹치면 `409 BANK_NAME_TAKEN`(등록·이름 변경 모두, 초대 코드는 남는다). 같은 이름이 둘이면 보내는 은행 화면에서 받는 은행을 하나로 정할 수 없고 거래내역의 보낸 은행 이름을 믿을 수 없기 때문이다. 5절 표 |

@@ -140,27 +140,54 @@ async def test_same_base_url_is_bank_exists(client, banks):
     assert (await self_register(client, code, "http://other/interbank")).status_code == 201
 
 
+async def test_same_name_is_bank_name_taken(client, banks):
+    """은행 이름은 유일하다 (공백·대소문자 무시). 셀프 등록·관리자 등록·PATCH /v1/me·관리자 PATCH 모두 409 BANK_NAME_TAKEN.
+    거절돼도 초대 코드는 쓰이지 않은 채로 남는다. 자기 이름을 같은 값으로 다시 넣는 것은 된다."""
+    code = await invite(client)
+    for taken in ("AvengersBank", "avengers bank", " AVENGERSBANK "):
+        res = await self_register(client, code, "http://c-bank/interbank", name=taken)
+        assert (res.status_code, res.json()["error"]) == (409, "BANK_NAME_TAKEN"), res.text
+        assert "(901)" in res.json()["message"]
+    res = await self_register(client, code, "http://c-bank/interbank", name="CBank")
+    assert res.status_code == 201, res.text  # 초대 코드가 아직 살아 있다
+    c_bank = SignedBank(client, res.json()["bank_code"], res.json()["api_key"], SIM_PRIVATE_KEY)
+
+    res = await client.post("/admin/banks", json={"bank_code": "990", "name": "Sim Bank", "base_url": "http://d/interbank",
+                                                  "public_key": SIM_PUBLIC_KEY}, headers=ADMIN)
+    assert (res.status_code, res.json()["error"]) == (409, "BANK_NAME_TAKEN")  # 902 "SimBank"
+    res = await c_bank.client.patch("/v1/me", content=b'{"name":"SimBank"}',
+                                    headers=c_bank.headers("PATCH", "/v1/me", b'{"name":"SimBank"}'))
+    assert (res.status_code, res.json()["error"]) == (409, "BANK_NAME_TAKEN")
+    res = await c_bank.client.patch("/v1/me", content=b'{"name":"CBank"}',
+                                    headers=c_bank.headers("PATCH", "/v1/me", b'{"name":"CBank"}'))
+    assert res.status_code == 200 and res.json()["name"] == "CBank"  # 자기 이름 그대로는 된다
+    res = await client.patch("/admin/banks/901", json={"name": "cbank"}, headers=ADMIN)
+    assert (res.status_code, res.json()["error"]) == (409, "BANK_NAME_TAKEN")
+    assert (await client.patch("/admin/banks/901", json={"name": "AvengersBank"}, headers=ADMIN)).status_code == 200
+
+
 async def test_bank_code_assignment_skips_used(client, monkeypatch):
     """BANK_CODE_START부터 비어 있는 가장 작은 코드. 관리자가 넣은 코드(990 등)와 중간의 빈 칸도 맞게 다룬다."""
     await register_bank(client, "903", "Admin903")
     await register_bank(client, "905", "Admin905", "http://a905/interbank")
     codes = []
     for host in ("p", "q", "r"):
-        res = await self_register(client, await invite(client, host), f"http://{host}/interbank", generate_keypair()[1])
+        res = await self_register(client, await invite(client, host), f"http://{host}/interbank", generate_keypair()[1],
+                                  name=f"Bank {host}")  # 이름은 은행마다 달라야 한다 (BANK_NAME_TAKEN)
         codes.append(res.json()["bank_code"])
     assert codes == ["904", "906", "907"]
 
     monkeypatch.setattr(get_settings(), "bank_code_start", "998")
     await register_bank(client, "999", "Admin999", "http://a999/interbank")
-    res = await self_register(client, await invite(client), "http://s/interbank", generate_keypair()[1])
+    res = await self_register(client, await invite(client), "http://s/interbank", generate_keypair()[1], name="Bank s")
     assert res.json()["bank_code"] == "998"
-    res = await self_register(client, await invite(client), "http://t/interbank", generate_keypair()[1])
+    res = await self_register(client, await invite(client), "http://t/interbank", generate_keypair()[1], name="Bank t")
     assert (res.status_code, res.json()["error"]) == (409, "BANK_CODE_EXHAUSTED")
 
 
 async def test_concurrent_registrations_get_different_codes(client):
     codes = [await invite(client, str(i)) for i in range(3)]
-    results = await asyncio.gather(*(self_register(client, c, f"http://h{i}/interbank", generate_keypair()[1])
+    results = await asyncio.gather(*(self_register(client, c, f"http://h{i}/interbank", generate_keypair()[1], name=f"Bank {i}")
                                      for i, c in enumerate(codes)))
     assert all(r.status_code == 201 for r in results), [r.text for r in results]
     assert sorted(r.json()["bank_code"] for r in results) == ["903", "904", "905"]

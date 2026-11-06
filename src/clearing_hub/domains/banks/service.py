@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clearing_hub.core.config import get_settings
@@ -41,6 +41,22 @@ def _normalize_url(url) -> str:
     return str(url).rstrip("/")
 
 
+def normalized_name(name: str) -> str:
+    """이름 비교 키: 소문자, 공백 제거. "Avengers Bank"와 "avengersbank"는 같은 이름으로 본다 (SPEC 3.5)."""
+    return "".join(name.split()).lower()
+
+
+async def _require_unique_name(db: AsyncSession, name: str, exclude_code: str | None = None) -> None:
+    """같은 이름(공백·대소문자 무시)의 은행이 있으면 409 BANK_NAME_TAKEN. 은행 이름은 다른 은행 화면과 거래내역에
+    그대로 나오므로 유일해야 한다 — 같은 이름이 둘이면 "B은행으로 보내줘"가 하나로 정해지지 않고, 보낸 은행 이름을 믿을 수 없다."""
+    key = normalized_name(name)
+    stmt = select(Bank).where(func.replace(func.lower(Bank.name), " ", "") == key)
+    for bank in (await db.scalars(stmt)).all():
+        if normalized_name(bank.name) == key and bank.bank_code != exclude_code:
+            raise ApiException(409, "BANK_NAME_TAKEN",
+                               f"은행 이름 '{name}'은(는) 이미 쓰고 있습니다 ({bank.bank_code}). 다른 이름을 정하세요")
+
+
 async def _create_bank(db: AsyncSession, bank_code: str, name: str, base_url: str, public_key: str,
                        net_debit_cap: int | None) -> tuple[Bank, str]:
     """은행 + 예치금 계좌(잔액 0) 생성. (bank, api_key)를 돌려준다. api_key는 이때만 볼 수 있다 (허브는 해시만 갖는다).
@@ -62,6 +78,7 @@ async def register_bank(db: AsyncSession, data: BankCreate) -> tuple[Bank, str]:
     """관리자 직접 등록 (코드를 관리자가 정한다. 시연용 990 등). 보통은 셀프 등록(self_register)을 쓴다."""
     if await get_bank(db, data.bank_code):
         raise ApiException(409, "BANK_EXISTS", f"은행 코드 {data.bank_code}는 이미 있습니다")
+    await _require_unique_name(db, data.name)
     return await _create_bank(db, data.bank_code, data.name, _normalize_url(data.base_url), data.public_key,
                               data.net_debit_cap)
 
@@ -77,6 +94,7 @@ async def update_bank(db: AsyncSession, bank_code: str, data: BankUpdate) -> Ban
     """이름·base_url·순채무한도 변경. 진행 중인 재시도도 다음 호출부터 새 주소로 간다 (거래에는 주소를 저장하지 않는다)."""
     bank = await _require_bank(db, bank_code)
     if data.name is not None:
+        await _require_unique_name(db, data.name, exclude_code=bank_code)
         bank.name = data.name
     if data.base_url is not None:
         bank.base_url = _normalize_url(data.base_url)
@@ -87,8 +105,9 @@ async def update_bank(db: AsyncSession, bank_code: str, data: BankUpdate) -> Ban
 
 
 async def update_me(db: AsyncSession, bank: Bank, name: str | None, base_url: str | None) -> Bank:
-    """은행 셀프 변경 (PATCH /v1/me). base_url은 라우터가 ping으로 확인한 뒤에만 넘긴다."""
+    """은행 셀프 변경 (PATCH /v1/me). base_url은 라우터가 ping으로 확인한 뒤에만 넘긴다. 이름은 유일해야 한다."""
     if name is not None:
+        await _require_unique_name(db, name, exclude_code=bank.bank_code)
         bank.name = name
     if base_url is not None:
         bank.base_url = _normalize_url(base_url)
@@ -180,6 +199,7 @@ async def self_register(db: AsyncSession, data: BankRegister) -> tuple[Bank, str
     existing = await db.scalar(select(Bank).where(Bank.base_url == base_url))
     if existing is not None:
         raise ApiException(409, "BANK_EXISTS", f"이 base_url로 이미 등록된 은행이 있습니다 ({existing.bank_code})")
+    await _require_unique_name(db, data.name)  # 예외면 트랜잭션이 롤백돼 초대 코드는 쓰이지 않은 채로 남는다
     bank, api_key = await _create_bank(db, await next_bank_code(db), data.name, base_url, data.public_key, None)
     invite.used_at, invite.used_by_bank_code = datetime.now(UTC), bank.bank_code
     await db.flush()

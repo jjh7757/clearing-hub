@@ -16,6 +16,7 @@
 ```
 src/clearing_hub/
 ├── main.py                 앱, 재시도·정산 태스크 시작
+├── devserver.py            로컬 개발 서버: 허브 + 가짜 은행을 한 명령으로 (SQLite, 아래 "로컬에서 한 명령으로")
 ├── core/
 │   ├── signing.py          Ed25519 요청 서명, 응답 서명, 키 쌍·지문, API 키·초대 코드 발급 (SPEC 2.2·2.3·2.5)
 │   ├── auth.py             은행 인증(등록된 공개키로 Ed25519 검증, 이전 키 24시간), 관리자 토큰
@@ -39,6 +40,7 @@ src/clearing_hub/
     ├── retry.py            미확인(PENDING) 거래 확인 태스크
     └── settlement.py       일일 정산 배치 (매일 00:05 KST 어제 정산 DRAFT, 설정 시 자동 확정, 시작 때 놓친 배치 catch-up)
 src/bank_sim/main.py        가짜 은행 (SPEC 4·9.4절 참고 구현, 계좌번호 끝자리로 성공·실패·지연·속임 재현, 허브 공개키 검증, 응답 서명)
+examples/README.md          참고 구현 목록 (Python bank_sim, SPEC 빠른 시작, Node.js는 준비 중)
 tests/                      서명, 인증, 이체 성공·실패·멱등·타임아웃·재시도, 예치금·순채무한도·정산·대사 API,
                             시연 시나리오 전체 (test_demo_scenario.py = docs/DEMO.md), 부인방지 K1~K10 (test_nonrepudiation.py),
                             셀프 등록·기본 한도·/v1/me (test_onboarding.py), 서명 진단기 (test_signature_doctor.py), 연동 진단 API·401 hint (test_support.py)
@@ -75,7 +77,26 @@ API 문서: http://127.0.0.1:8000/docs
 
 > Windows에서는 `uv run fastapi run`이 psycopg 비동기 모드와 맞지 않는다. 개발 중에는 `fastapi dev`를 쓴다.
 
-## 가짜 은행과 함께 돌려 보기
+## 로컬에서 한 명령으로 (PostgreSQL 없이)
+
+다른 팀이 자기 은행 서버를 로컬 허브에 붙여 보거나, 허브를 고치며 손으로 확인할 때 쓴다. **개발 전용**이다.
+
+```bash
+uv sync
+```
+```bash
+uv run python -m clearing_hub.devserver
+```
+
+- 허브 `http://127.0.0.1:8000`(API 문서 `/docs`)과 가짜 은행 `902` `http://127.0.0.1:8100/interbank`가 한 프로세스로 함께 뜬다. 종료는 Ctrl+C. 포트는 `--hub-port`·`--sim-port`로 바꾼다
+- 처음 실행하면 관리자 토큰·허브 키·가짜 은행 키를 만들어 **`.env.dev`**(현재 폴더)에 저장하고 다음부터 다시 쓴다. DB는 **`dev_hub.db`**(SQLite). 둘 다 `.gitignore`에 있다. 처음부터 다시 하려면 `dev_hub.db`를 지운다
+- 시작할 때 `902`가 없으면 등록하고 예치금 1,000만 원을 넣은 뒤, **새 초대 코드를 만들어 초대 문구를 콘솔에 출력**한다 (관리자 토큰, 허브 주소, 초대 코드, 허브 공개키·지문). 이것으로 [SPEC "빠른 시작"](docs/SPEC.md)을 그대로 따라 한다
+- 내 은행의 `base_url`은 `http://127.0.0.1:3000/interbank`처럼 http로 등록해도 된다 (허브는 `base_url`의 https를 강제하지 않는다. 운영 허브에는 SPEC 3.5대로 공개 HTTPS)
+- 초대 코드가 더 필요하면: `curl -X POST http://127.0.0.1:8000/admin/invites -H "X-Admin-Token: <콘솔의 토큰>"`
+
+운영과 다른 점: 테이블을 Alembic이 아니라 `Base.metadata.create_all`로 만든다(Alembic의 FK 추가가 SQLite에서 되지 않는다), 정산 일일 배치(`SETTLEMENT_WORKER_ENABLED=false`)와 알림 웹훅이 꺼져 있다. 환경 변수에 이미 있는 값(`DATABASE_URL` 등)이 `.env.dev`보다 먼저다.
+
+## 가짜 은행과 함께 돌려 보기 (PostgreSQL, 따로 띄우기)
 
 1. 가짜 은행 키 쌍을 만들고(위 명령), 공개키로 902를 등록한다 (관리 API, `X-Admin-Token` 헤더):
    ```bash

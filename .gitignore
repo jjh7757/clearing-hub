@@ -4,3 +4,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 *.db
+
+# 로컬 개발 서버 (python -m clearing_hub.devserver)
+.env.dev
+dev_hub.db

@@ -1,8 +1,8 @@
-# ClearingHub 참가 은행 연동 규격 v1.2 (초안)
+# ClearingHub 참가 은행 연동 규격 v1.2.1 (초안)
 
 - 작성일: 2026-11-05 (최종 수정 2026-11-06)
 - 대상: ClearingHub(은행 간 이체 중계 서버)에 참가하려는 은행 서버 개발팀
-- 상태: **v1.2 초안**. 서명은 Ed25519 하나다(2절, 요청·응답 모두). 참가는 초대 코드로 셀프 등록하고(3.5, 7절), 받는 쪽은 셀프 시험으로 확인한다(3.7). 정산은 은행의 확인(ack)으로 자동 확정된다(10.8). 401로 막히면 응답의 `hint`와 연동 진단 API로 원인을 본다(3.8). 다른 팀이 연동을 시작하기 전에 확정한다
+- 상태: **v1.2.1 초안** (v1.2와 동작이 같고 문서만 고쳤다). 처음이면 바로 아래 **빠른 시작**부터 본다. 서명은 Ed25519 하나다(2절, 요청·응답 모두). 참가는 초대 코드로 셀프 등록하고(3.5, 7절), 받는 쪽은 셀프 시험으로 확인한다(3.7). 정산은 은행의 확인(ack)으로 자동 확정된다(10.7). 401로 막히면 응답의 `hint`와 연동 진단 API로 원인을 본다(3.8). 다른 팀이 연동을 시작하기 전에 확정한다
 - 배경·전체 설계: [PROJECT_PLAN.md](PROJECT_PLAN.md) (허브 저장소 안의 문서. 이 문서만 받았다면 읽지 않아도 연동에 지장이 없다)
 
 이 문서는 두 가지를 정한다.
@@ -11,6 +11,349 @@
 2. 은행이 허브로부터 **받기 위해 만들어야 하는** API (4절)
 
 둘 다 같은 인증 방식(2절)과 오류 형식(5절)을 쓴다. 9절의 본인 명의 계좌 조회는 참여 여부를 은행이 고르는 선택 기능이다. 10절의 정산은 허브가 매일 은행 사이의 차액을 모의 예치금으로 옮기는 것이다. 대사(자기 장부와 맞춰 보기)는 선택이지만, 예치금·순채무한도가 모자라면 송금이 거절된다는 점(10.2)은 모든 은행에 적용된다.
+
+## 빠른 시작: 등록·시험까지 1~2시간
+
+처음 받은 팀은 **이 절만 따라 하면** 키 만들기부터 셀프 등록·보내기 시험·받기 시험까지 끝난다. 그 아래 1~10절은 막혔을 때 찾아보는 참조다. 이 절의 코드 블록은 허브 저장소의 테스트(`tests/test_quickstart.py`)가 실제로 실행해 확인한다.
+
+절 제목의 표시: **[필수]** 모든 은행이 구현한다 · **[알아야 함]** 구현할 것은 없지만 내 은행 동작에 영향이 있다 · **[선택]** 하지 않아도 이체는 된다.
+
+> **로컬에서 먼저 연습하기**: 허브 저장소가 있으면 `uv run python -m clearing_hub.devserver` 한 명령으로 허브(`http://127.0.0.1:8000`)와 가짜 은행 `902`(`http://127.0.0.1:8100`)가 함께 뜬다. 콘솔에 초대 문구(초대 코드·허브 공개키·지문)가 나오므로 관리자 DM 없이 이 절을 그대로 해 볼 수 있다. 로컬 허브에는 `base_url`을 `http://127.0.0.1:3000/interbank`처럼 http로 등록해도 된다 (운영 허브는 공개 HTTPS, 3.5). 저장소 `README.md`의 "로컬에서 한 명령으로".
+
+### 0. 받을 것과 전체 그림 (10분)
+
+| 무엇 | 어디서 |
+|---|---|
+| 초대 코드 `inv_…` (7일, 한 번만) | 허브 관리자 DM (초대 문구) |
+| 허브 공개키와 지문 | 같은 DM. 등록 응답의 `hub_fingerprint`와 맞춰 본다 |
+| 허브 주소 | `https://clearing-hub.ai-agent-develop.cloud` (로컬 연습은 `http://127.0.0.1:8000`) |
+| 내 `base_url` | 내가 준비한다: 허브가 부를 공개 HTTPS 주소, 공인 인증서. 예: `https://c-bank.example.com/interbank` |
+
+```mermaid
+sequenceDiagram
+    participant A as 보내는 은행
+    participant H as ClearingHub
+    participant B as 받는 은행
+    A->>H: POST /v1/transfers (A 개인키로 요청 서명)
+    H->>B: POST {base_url}/receive (허브 개인키로 요청 서명)
+    Note over B: 허브 공개키로 검증 → 입금
+    B-->>H: 200 COMPLETED + 응답 서명 (B 개인키, 요청 X-Signature에 묶음)
+    H-->>A: 200 COMPLETED + 응답 서명 (허브 개인키)
+    Note over A,B: 내 은행은 A 자리(보내기)와 B 자리(받기) 모두에 선다
+```
+
+서명은 세 가지뿐이다: ① 내가 허브를 부를 때 **내 개인키로 요청 서명**, ② 허브가 나를 부르면 **허브 공개키로 검증**, ③ 내 응답에 **내 개인키로 응답 서명**. 모두 Ed25519다.
+
+### 1. 키 쌍 만들기 (5분)
+
+`pip install cryptography fastapi uvicorn httpx` 뒤 한 번만 실행한다.
+
+<!-- quickstart:keypair -->
+```python
+import base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+key = Ed25519PrivateKey.generate()
+print("BANK_PRIVATE_KEY=" + base64.b64encode(key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())).decode())
+print("BANK_PUBLIC_KEY=" + base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode())
+```
+
+- **확인**: 두 줄 모두 `=` 뒤가 44자(끝이 `=`)다.
+- 개인키는 **서버 환경 변수 `BANK_PRIVATE_KEY`에만** 둔다 (Git·채팅·허브에 주지 않는다). 공개키는 4단계에서 등록한다.
+- 자세히: 2.6
+
+### 2. 서명·검증 함수 (20분)
+
+아래를 `signing.py`로 저장한다. 서명 2개(요청·응답)와 검증 2개(요청·응답)가 전부다.
+
+<!-- quickstart:signing -->
+```python
+# signing.py — 2.3·2.5의 참고 구현을 한 파일로 (pip install cryptography)
+import base64
+import time
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+
+
+def _sign(private_key_b64: str, message: bytes) -> str:
+    key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_key_b64))
+    return base64.b64encode(key.sign(message)).decode()
+
+
+def _verify(public_key_b64: str, message: bytes, signature_b64: str) -> bool:
+    try:  # 키·서명이 base64가 아니거나 길이가 틀려도 예외(500) 대신 False(401)
+        key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64, validate=True))
+        key.verify(base64.b64decode(signature_b64, validate=True), message)
+        return True
+    except (InvalidSignature, ValueError, TypeError):
+        return False
+
+
+def _fresh(ts: str, skew: int = 300) -> bool:  # 시각 차이 5분 (2.2)
+    try:
+        return abs(int(time.time()) - int(ts)) <= skew
+    except (ValueError, TypeError):
+        return False
+
+
+def sign_request(private_key_b64: str, method: str, path: str, body: bytes, ts: str | None = None) -> dict[str, str]:
+    """요청 서명 (2.2). path: 은행→허브는 /v1부터, 허브→은행은 base_url 뒤 부분. body: 보내는 바이트 그대로."""
+    ts = ts or str(int(time.time()))
+    msg = f"{ts}\n{method.upper()}\n{path}\n".encode() + body
+    return {"X-Timestamp": ts, "X-Signature": _sign(private_key_b64, msg), "X-Signature-Alg": "ed25519"}
+
+
+def verify_request(public_key_b64: str, ts: str, method: str, path: str, body: bytes, signature: str) -> bool:
+    return _fresh(ts) and _verify(public_key_b64, f"{ts}\n{method.upper()}\n{path}\n".encode() + body, signature)
+
+
+def sign_response(private_key_b64: str, status: int, request_signature: str, body: bytes,
+                  ts: str | None = None) -> dict[str, str]:
+    """응답 서명 (2.5). request_signature: 그 요청의 X-Signature 그대로(없었으면 ""). body: 보내는 바이트 그대로."""
+    ts = ts or str(int(time.time()))
+    msg = f"{ts}\n{status}\n{request_signature}\n".encode() + body
+    return {"X-Response-Timestamp": ts, "X-Response-Signature": _sign(private_key_b64, msg), "X-Signature-Alg": "ed25519"}
+
+
+def verify_response(public_key_b64: str, ts: str, status: int, request_signature: str, body: bytes,
+                    signature: str) -> bool:
+    return _fresh(ts) and _verify(public_key_b64, f"{ts}\n{status}\n{request_signature}\n".encode() + body, signature)
+```
+
+**확인**: 아래가 `서명 함수 OK`를 출력하면 2.3의 예시 1·2, 2.5의 예시 3과 값이 같은 것이다 (예시 키는 공개된 검증 전용 값).
+
+<!-- quickstart:signing-check -->
+```python
+from signing import _verify, sign_request, sign_response, verify_request
+
+BANK_KEY, BANK_PUB = "D7frsUqSl9ZuC+7EpHfY1+w6+dAlWqg8vuHVtZfdpg4=", "gxCDPKbN/rIXKDJgn4GZh5JY7I65Cwbk3A/mJjTtPzY="
+HUB_KEY = "cycR/h4ydSTPkBGuRFO340cDtdAdwrXQjKC4N1GPgtQ="
+body1 = '{"transfer_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7","to_bank":"902","to_account":"110-123-0001","from_account":"110-200-456789","amount":50000,"sender_name":"홍길동","memo":"생활비"}'.encode()
+s1 = sign_request(BANK_KEY, "POST", "/v1/transfers", body1, ts="1762300800")["X-Signature"]
+s2 = sign_request(HUB_KEY, "GET", "/receive/7c9e6679-7425-40de-944b-e07fc1f90ae7", b"", ts="1762300800")["X-Signature"]
+body3 = '{"transfer_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7","status":"COMPLETED","holder_name":"김철수","received_at":"2026-11-05T01:20:02Z"}'.encode()
+s3 = sign_response(BANK_KEY, 200, s2, body3, ts="1762300801")["X-Response-Signature"]
+assert s1 == "SY/3NCjTxAR1dC5UXHM/PkQZR9/SMa+wcDBSIrAit0jeHW5JKKgw4vZWKiN2Z7o5V+ywCY7EyWsTEfLf/F3mBw==", "예시 1"
+assert s2 == "IMn6yCKkn/eZGPNY74b3+cNvA/4ax9knE97hh4wCQnPEHe6IEdKREh/Pit3+7bJJjx801OiRbJIvJD0HbKzPAA==", "예시 2"
+assert s3 == "D84tooOZEJ6jehp/BN6dVPw1KZCB+eejxpZOqgggeTW7iJznoyNjQGEFwShbhnX7prHkg9uG9e7rP9IxZS91Dg==", "예시 3"
+assert _verify(BANK_PUB, b"1762300800\nPOST\n/v1/transfers\n" + body1, s1)
+now = sign_request(BANK_KEY, "GET", "/v1/banks", b"")  # 지금 시각으로 만든 서명은 검증도 통과한다
+assert verify_request(BANK_PUB, now["X-Timestamp"], "GET", "/v1/banks", b"", now["X-Signature"])
+print("서명 함수 OK")
+```
+
+- 다른 언어: Ed25519 라이브러리의 sign·verify를 쓰고, 위 확인과 같은 값이 나오는지 먼저 본다. raw 32바이트 키를 DER로만 받는 라이브러리(Node.js `crypto` 등)는 개인키 앞에 `302e020100300506032b657004220420`(PKCS#8), 공개키 앞에 `302a300506032b6570032100`(SPKI)을 16진수 그대로 붙여 DER로 읽는다. Node.js는 `crypto.sign(null, message, privateKey)`·`crypto.verify(null, message, publicKey, signature)`다.
+- 틀리기 쉬운 곳: 본문은 **보내는(받은) 바이트 그대로**(다시 직렬화하지 않는다), 본문이 없어도 `PATH` 뒤 `\n`은 넣는다, base64는 표준(`+`·`/`·`=`)이다.
+- 자세히: 2.2, 2.3, 2.5
+
+### 3. 받는 쪽 최소 구현 (30분)
+
+허브가 부르는 API 3개(`/inquiry`, `/receive`, `/receive/{transfer_id}`)와 응답 서명이다. 아래를 `bank.py`로 저장하고 `BANK_PRIVATE_KEY`(1단계)·`HUB_PUBLIC_KEY`(초대 문구의 허브 공개키, 지문을 맞춰 본 것)를 환경 변수로 넣어 `uvicorn bank:app --port 3000`으로 띄운다. `base_url`은 `https://내 주소/interbank`가 된다.
+
+<!-- quickstart:receiver -->
+```python
+# bank.py — 받는 쪽 최소 구현 (4절). 저장은 메모리라 연습용이다
+import json, os
+from datetime import datetime, timezone
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from signing import sign_response, verify_request
+
+BANK_PRIVATE_KEY = os.environ["BANK_PRIVATE_KEY"]  # 응답 서명용 내 개인키
+HUB_PUBLIC_KEY = os.environ["HUB_PUBLIC_KEY"]  # 허브 요청 검증용
+PREFIX = "/interbank"  # base_url의 경로 부분
+ACCOUNTS = {"110-123-000001": "김민수"}  # 계좌번호 → 예금주 (실제로는 DB)
+# transfer_id → 입금 기록. 실제로는 DB 테이블에 transfer_id 유니크 제약을 걸고, 입금과 기록을 한 트랜잭션으로 (4.2 규칙 1·2)
+received: dict[str, dict] = {}
+
+
+class SignResponses:
+    """순수 ASGI 미들웨어: 2xx·4xx 응답 본문 바이트에 응답 서명을 붙인다 (2.5). 서명 검증 실패 401에도 붙는다."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        request_signature, start = dict(scope["headers"]).get(b"x-signature", b"").decode(), {}
+
+        async def send_signed(message):
+            if message["type"] == "http.response.start":
+                return start.update(message)  # 본문을 볼 때까지 미룬다
+            if start:
+                if start["status"] < 500:
+                    signed = sign_response(BANK_PRIVATE_KEY, start["status"], request_signature, message.get("body", b""))
+                    start["headers"] = [*start["headers"], *((k.lower().encode(), v.encode()) for k, v in signed.items())]
+                await send(start)
+                start.clear()
+            await send(message)
+        await self.app(scope, receive, send_signed)
+
+
+app = FastAPI()
+app.add_middleware(SignResponses)
+
+
+class BadSignature(Exception):
+    pass
+
+
+def error(status: int, code: str, message: str, **extra) -> JSONResponse:
+    return JSONResponse({"error": code, "message": message, **extra}, status_code=status)
+
+
+@app.exception_handler(BadSignature)
+async def bad_signature(request: Request, exc: BadSignature):
+    return error(401, "SIGNATURE_INVALID", "서명이 맞지 않습니다")  # 이 401에도 응답 서명이 붙는다
+
+
+async def hub_request(request: Request) -> dict:
+    """허브 서명 검증 (2.2): 원본 바이트로, 허브 공개키로, PATH는 base_url 뒤 부분. 입금 처리보다 먼저 한다."""
+    body, h = await request.body(), request.headers
+    path = request.url.path.partition(PREFIX)[2]  # /interbank/receive → /receive
+    if (h.get("x-bank-code") != "000" or h.get("x-signature-alg", "ed25519") != "ed25519"
+            or not verify_request(HUB_PUBLIC_KEY, h.get("x-timestamp"), request.method, path, body, h.get("x-signature"))):
+        raise BadSignature()
+    return json.loads(body) if body else {}
+
+
+@app.post(PREFIX + "/inquiry")
+async def inquiry(request: Request):
+    account = (await hub_request(request)).get("account_num")
+    if account not in ACCOUNTS:
+        return error(404, "ACCOUNT_NOT_FOUND", "받는 계좌를 찾을 수 없습니다")
+    return {"holder_name": ACCOUNTS[account]}
+
+
+@app.post(PREFIX + "/receive")
+async def receive(request: Request):
+    data = await hub_request(request)
+    tid = data.get("transfer_id")
+    if tid not in received:  # 같은 ID가 다시 오면 입금하지 않고 같은 답 (4.2 규칙 1)
+        if data.get("to_account") not in ACCOUNTS:  # 거절은 4xx, 기록하지 않는다 (4.2 규칙 5)
+            return error(404, "ACCOUNT_NOT_FOUND", "받는 계좌를 찾을 수 없습니다", transfer_id=tid)
+        # 여기서 [한 트랜잭션] 고객 계좌 입금 + 기록. 유니크 제약에 걸리면 4xx가 아니라 200(저장된 결과)이나 5xx (4.2 규칙 2)
+        received[tid] = {**data, "holder_name": ACCOUNTS[data["to_account"]],
+                         "received_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    return {"transfer_id": tid, "status": "COMPLETED", "holder_name": received[tid]["holder_name"]}
+
+
+@app.get(PREFIX + "/receive/{transfer_id}")
+async def receive_status(transfer_id: str, request: Request):
+    await hub_request(request)
+    if (record := received.get(transfer_id)) is None:  # 입금하지 않은 거래는 모두 404 (4.3)
+        return error(404, "TRANSFER_NOT_FOUND", "그 거래 ID로 입금한 적이 없습니다", transfer_id=transfer_id)
+    return {"transfer_id": transfer_id, "status": "COMPLETED", "holder_name": record["holder_name"],
+            "received_at": record["received_at"]}
+```
+
+- **확인**: 4단계 등록 응답의 `ping.ok`가 `true`면 연결·허브 서명 검증·응답 서명이 모두 된 것이다 (허브가 없는 계좌로 `/inquiry`를 불러 서명된 `404 ACCOUNT_NOT_FOUND`를 받는다). 4.2·4.3은 6단계에서 확인한다.
+- 실제 서버로 옮길 때 지킬 것: 입금을 끝내지 않았으면 2xx로 답하지 않는다(거절 4xx, 일시 장애 5xx), 응답 서명 미들웨어는 서명 검증보다 바깥에 둔다, 본문 필드 검사(`VALIDATION_ERROR` 422)를 더한다.
+- 자세히: 4절, 2.5, 4.2의 "은행이 지켜야 할 것"
+
+### 4. 셀프 등록 (5분)
+
+3단계 서버를 공개 주소로 띄운 상태에서 등록한다 (`HUB`는 허브 주소, 값은 초대 문구와 1단계의 것).
+
+```bash
+curl -s -X POST "$HUB/v1/banks/register" -H "Content-Type: application/json" -d '{"invite_code":"inv_…","name":"CBank","base_url":"https://c-bank.example.com/interbank","public_key":"<1단계 BANK_PUBLIC_KEY>"}'
+```
+
+PowerShell은 `Invoke-RestMethod -Method Post -Uri "$HUB/v1/banks/register" -ContentType "application/json" -Body '{…같은 JSON…}'`.
+
+- **확인**: `201`이고 `ping.ok`가 `true`, `hub_fingerprint`가 초대 문구의 지문과 같다.
+- 응답의 `bank_code`를 `BANK_CODE`, `api_key`를 `BANK_API_KEY` 환경 변수에 저장한다. **`api_key`는 이 응답에만 있다.**
+- `ping.ok`가 `false`여도 등록은 된 것이다. 3.6의 ping 결과 표로 고친 뒤 `POST /v1/me/ping`으로 다시 본다 (7단계의 `hint`도 본다).
+- 자세히: 3.5, 3.6
+
+### 5. 보내는 쪽: 가짜 은행 `902`로 이체 (20분)
+
+아래를 `send.py`로 저장하고 `HUB`·`BANK_CODE`·`BANK_API_KEY`·`BANK_PRIVATE_KEY`·`HUB_PUBLIC_KEY`를 넣어 `python send.py`. `902` 계좌 `110-123-0001`은 항상 정상 입금된다.
+
+<!-- quickstart:sender -->
+```python
+# send.py — 보내는 쪽: 서명해서 허브를 부르고, 허브 응답 서명을 검증한다 (2단계 signing.py 사용, pip install httpx)
+import json
+import os
+import uuid
+
+import httpx
+
+from signing import sign_request, verify_response
+
+HUB = os.environ.get("HUB", "https://clearing-hub.ai-agent-develop.cloud")  # 로컬 연습은 http://127.0.0.1:8000
+
+
+def call(method: str, path: str, payload: dict | None = None) -> dict:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode() if payload is not None else b""
+    signed = sign_request(os.environ["BANK_PRIVATE_KEY"], method, path, body)  # path는 /v1부터
+    headers = {"X-Bank-Code": os.environ["BANK_CODE"], "X-Api-Key": os.environ["BANK_API_KEY"],
+               "Content-Type": "application/json", **signed}
+    res = httpx.request(method, HUB + path, content=body, headers=headers, timeout=10)
+    ok = verify_response(os.environ["HUB_PUBLIC_KEY"], res.headers.get("x-response-timestamp"), res.status_code,
+                         signed["X-Signature"], res.content, res.headers.get("x-response-signature"))
+    print(method, path, res.status_code, "허브 응답 서명", "맞음" if ok else "틀림 → 본문을 믿지 않는다 (2.5)")
+    return res.json()
+
+
+if __name__ == "__main__":
+    print(call("GET", "/v1/banks"))
+    print(call("POST", "/v1/inquiry", {"to_bank": "902", "to_account": "110-123-0001"}))
+    # 실제로는 이 요청 전에 내 DB에서 출금(중간 계정으로)을 끝내 둔다 (6절)
+    result = call("POST", "/v1/transfers", {"transfer_id": str(uuid.uuid4()), "to_bank": "902", "to_account": "110-123-0001",
+                                             "from_account": "110-200-456789", "amount": 1000, "sender_name": "홍길동"})
+    print(result)
+```
+
+- **확인**: 세 줄 모두 `허브 응답 서명 맞음`, 은행 목록에 `902`, 수취 조회 `holder_name: 김철수`, 이체 `200`·`status: COMPLETED`.
+- **되돌림 규칙 한 줄**: 출금을 되돌리는 것은 응답 본문의 `status`가 `"FAILED"`일 때**만**이다. `202 PENDING`·`status` 없는 4xx·5xx·타임아웃은 되돌리지 않고 같은 `transfer_id`로 재전송하거나 `GET /v1/transfers/{id}`로 확인한다 (3.3, 3.4).
+- 더 해 볼 것: 계좌 `110-123-0002`(계좌 없음 → `404`·`status: FAILED`), 같은 `transfer_id`로 다시 보내기(같은 결과, 입금 1번). 끝자리별 동작은 7절 6.
+- 자세히: 3.1~3.4, 6절
+
+### 6. 받는 쪽 시험: 셀프 시험 (10분)
+
+허브가 `902` 명의로 **내 은행에** 시험 이체를 만들어 3단계 서버의 `/receive`를 부른다. 5단계의 `call`을 쓴다.
+
+<!-- quickstart:selftest -->
+```python
+# selftest.py — 받는 쪽 시험 (3.7). 3단계 서버가 떠 있어야 한다
+from send import call
+
+r = call("POST", "/v1/test-receive", {"to_account": "110-123-000001", "amount": 1000})
+print(r["status"], r["receiver_reply"])  # COMPLETED, receiver_reply의 status 200·signature_valid true
+tid = r["transfer_id"]
+print(call("POST", f"/v1/test-receive/{tid}/resend"))  # 같은 ID 재전송: receiver_reply status 200, 입금은 여전히 1번
+print(call("GET", f"/v1/test-receive/{tid}/status"))  # 입금 확인(4.3): receiver_reply status 200 COMPLETED
+print(call("POST", "/v1/test-receive", {"to_account": "999-999-999999", "amount": 1000}))  # 404 ACCOUNT_NOT_FOUND, FAILED
+```
+
+- **확인**: 주석의 값이 나오고, 3단계 서버의 `received`에 거래가 1건(재전송해도 1건)이다. 없는 계좌로 거절한 거래는 `/status`가 `404 TRANSFER_NOT_FOUND`다.
+- 하루 20번까지다 (`429 TOO_MANY_TESTS`).
+- 자세히: 3.7, 7절 7
+
+### 7. 401이 나면
+
+1. 응답 본문의 **`hint`**를 본다. `원인 후보(확인됨)`이면 그것이 원인이다 (5절)
+2. 그래도 모르면 서명 없이 부르는 **`GET /v1/diagnose/failures`**로 실패 목록과 원인 가설을 본다:
+   ```bash
+   curl -s "$HUB/v1/diagnose/failures" -H "X-Bank-Code: $BANK_CODE" -H "X-Api-Key: $BANK_API_KEY"
+   ```
+3. `hint`가 없는 401이거나 위 요청 자체가 401이면 API 키 문제다. 허브 관리자에게 문의한다
+
+자세히: 3.8, 7절 8
+
+### 8. 그다음에 읽을 것
+
+| 절 | 왜 |
+|---|---|
+| 6절 보내는 은행의 처리 순서 **[필수]** | 출금 → 허브 호출 → 완료·되돌림·"모르는 상태" 처리. 이중 지급을 막는 규칙 |
+| 4.2 "은행이 지켜야 할 것" **[필수]** | 유니크 제약·한 트랜잭션·동시 중복 요청 (3단계 코드는 메모리라 이것이 빠져 있다) |
+| 10.2 예치금과 순채무한도 **[알아야 함]** | 한도(기본 10억)를 넘으면 송금이 `LIMIT_EXCEEDED`로 거절된다 |
+| 구현 체크리스트 (바로 아래) | 연동을 마쳤다고 보기 전에 모두 확인 |
+| 2.4 추적 ID, 3.6 주소 변경·ping, 9절 본인 계좌 조회, 10절 정산·대사 **[선택]** | 필요할 때 |
+
+---
 
 ### 구현 체크리스트
 
@@ -46,8 +389,8 @@
 
 **정산 (선택)**
 - [ ] 매일 `GET /v1/settlements`로 run을 받아, `GET /v1/settlements/{run_id}`의 `transfers`를 자기 장부와 `transfer_id`·금액으로 맞춰 본다. `DRAFT`는 비교하고 결과를 보낸다, `SETTLED`면 내부 계정 정리, `CANCELLED`는 무시한다 (10.5, 10.6)
-- [ ] `DRAFT`가 맞으면 `POST /v1/settlements/{run_id}/ack`, 안 맞으면 자동 처리를 멈추고 `POST /v1/settlements/{run_id}/dispute`로 차이 나는 `transfer_id`를 보낸다. 09:00 KST(확정 마감) 전에 보낸다 (10.8)
-- [ ] ack 응답의 `status`가 `SETTLED`면(전원 ack로 즉시 확정) 바로 10.5를 다시 받아 내부 계정을 정리한다. 409 `SETTLEMENT_NOT_DRAFT`면 10.5로 상태를 다시 본다 (10.8)
+- [ ] `DRAFT`가 맞으면 `POST /v1/settlements/{run_id}/ack`, 안 맞으면 자동 처리를 멈추고 `POST /v1/settlements/{run_id}/dispute`로 차이 나는 `transfer_id`를 보낸다. 09:00 KST(확정 마감) 전에 보낸다 (10.7)
+- [ ] ack 응답의 `status`가 `SETTLED`면(전원 ack로 즉시 확정) 바로 10.5를 다시 받아 내부 계정을 정리한다. 409 `SETTLEMENT_NOT_DRAFT`면 10.5로 상태를 다시 본다 (10.7)
 
 **운영**
 - [ ] 서버 시계를 NTP로 맞췄다 (2.2)
@@ -59,7 +402,7 @@
 
 ---
 
-## 1. 기본 규칙
+## 1. 기본 규칙 [필수]
 
 | 항목 | 규칙 |
 |---|---|
@@ -80,7 +423,7 @@
 
 ---
 
-## 2. 인증: Ed25519 공개키 서명
+## 2. 인증: Ed25519 공개키 서명 [필수]
 
 은행 → 허브, 허브 → 은행 요청은 **모두** Ed25519로 서명하고, 2xx·4xx 응답에도 서명한다(2.5). 받는 쪽은 서명이 맞을 때만 처리한다.
 
@@ -94,18 +437,18 @@
 
 **API 키 (`X-Api-Key`)**: 셀프 등록(3.5) 때 한 번 받는다. 은행 → 허브 요청에 항상 넣는다. **식별용**이며 서명 키가 아니다 (API 키만으로는 요청을 만들 수 없다). 유출되면 허브 관리자에게 재발급을 요청한다.
 
-### 2.1 헤더
+### 2.1 헤더 [필수]
 
 | 헤더 | 값 |
 |---|---|
 | `X-Bank-Code` | 요청을 보내는 쪽의 은행 코드. 허브가 보낼 때는 `"000"` |
-| `X-Api-Key` | 등록 때 받은 API 키. 은행 → 허브에만 쓴다. **허브 → 은행 요청에는 넣지 않는다** (8절 3) |
+| `X-Api-Key` | 등록 때 받은 API 키. 은행 → 허브에만 쓴다. **허브 → 은행 요청에는 넣지 않는다** (부록 A 3) |
 | `X-Timestamp` | Unix 시각(초), 10진 문자열. 예: `"1762300800"` |
 | `X-Signature` | 2.2의 서명. base64 88자 |
 | `X-Signature-Alg` | `ed25519` (권장). **생략하면 `ed25519`로 본다.** 그 밖의 값은 `SIGNATURE_INVALID`. 서명 대상이 아니다. 허브는 항상 넣는다 |
 | `X-Request-ID` | (선택) 로그 추적 ID. 서명 대상 아님 (2.4) |
 
-### 2.2 서명 만들기
+### 2.2 서명 만들기 [필수]
 
 ```
 message     = X-Timestamp + "\n" + METHOD + "\n" + PATH + "\n" + body
@@ -128,7 +471,7 @@ X-Signature = base64( Ed25519-Sign( 보내는 쪽 개인키, UTF-8 bytes of mess
 - 키와 서명은 **raw 바이트의 표준 base64**(`+`·`/`, 패딩 `=` 포함)다. 개인키·공개키는 32바이트(44자), 서명은 64바이트(88자). URL-safe base64나 PEM·DER 형식이 아니다.
 - 검증은 라이브러리의 `verify`를 쓴다. 은행 → 허브는 등록된 공개키로, 허브 → 은행은 허브 공개키(2.6)로 검증한다.
 
-### 2.3 예시 (검증용)
+### 2.3 예시 (검증용) [필수]
 
 예시용 키 쌍 (**검증 전용**. 모두에게 공개된 값이므로 운영에서는 쓰지 않는다):
 
@@ -196,8 +539,8 @@ def _verify(public_key_b64: str, message: bytes, signature_b64: str) -> bool:
     except (InvalidSignature, ValueError, TypeError):
         return False
 
-def sign_request(private_key_b64: str, method: str, path: str, body: bytes) -> dict[str, str]:
-    ts = str(int(time.time()))
+def sign_request(private_key_b64: str, method: str, path: str, body: bytes, ts: str | None = None) -> dict[str, str]:
+    ts = ts or str(int(time.time()))  # ts는 예시 값 확인용. 보통은 넘기지 않는다
     msg = f"{ts}\n{method.upper()}\n{path}\n".encode() + body
     return {"X-Timestamp": ts, "X-Signature": _sign(private_key_b64, msg), "X-Signature-Alg": "ed25519"}
 
@@ -217,7 +560,7 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 
 허브의 구현은 [`src/clearing_hub/core/signing.py`](../src/clearing_hub/core/signing.py)다 (저장소를 받았을 때).
 
-### 2.4 추적 ID `X-Request-ID` (선택)
+### 2.4 추적 ID `X-Request-ID` [선택]
 
 이체 하나를 보내는 은행 → 허브 → 받는 은행 세 서버의 로그에서 같은 ID로 찾기 위한 헤더다. **선택**이며, 없어도 모든 API가 똑같이 동작한다.
 
@@ -232,7 +575,7 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 
 허브의 재시도 태스크가 부르는 호출에도 같은 값이 가므로, 받는 은행은 "처음 요청과 재시도"를 한 ID로 묶어 볼 수 있다. 3.4 결과 조회처럼 보내는 은행이 나중에 따로 부르는 요청은 새 ID여도 된다 (거래는 `transfer_id`로 찾는다).
 
-### 2.5 응답 서명 (필수)
+### 2.5 응답 서명 [필수]
 
 요청 서명은 "누가 보냈는지"를, 응답 서명은 "**그 요청에 무엇이라고 답했는지**"를 증명한다. 받는 은행이 `200 COMPLETED`라고 답해 놓고 나중에 "그런 적 없다"고 하거나, 허브가 "그런 응답 받은 적 없다"고 할 때 서명된 응답으로 반박한다.
 
@@ -289,8 +632,9 @@ X-Signature-Alg      = ed25519
 Python 참고 구현 (2.3의 `_sign`·`_verify`를 쓴다):
 
 ```python
-def sign_response(private_key_b64: str, status: int, request_signature: str, body: bytes) -> dict[str, str]:
-    ts = str(int(time.time()))
+def sign_response(private_key_b64: str, status: int, request_signature: str, body: bytes,
+                  ts: str | None = None) -> dict[str, str]:
+    ts = ts or str(int(time.time()))
     msg = f"{ts}\n{status}\n{request_signature}\n".encode() + body
     return {"X-Response-Timestamp": ts, "X-Response-Signature": _sign(private_key_b64, msg), "X-Signature-Alg": "ed25519"}
 
@@ -308,7 +652,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 **보관 (권장)**: 분쟁 때 꺼낼 수 있게, 서명된 요청·응답의 **원본 바이트와 헤더**를 이체 관련 호출(3.3, 4.2, 4.3)만이라도 남겨 둔다. 허브는 이체마다 접수 요청, 4.2·4.3 요청과 응답 원문을 고치지 않고 보관한다.
 
-### 2.6 키: 만들기·등록·허브 공개키·회전
+### 2.6 키: 만들기·등록·허브 공개키·회전 [필수]
 
 **1. 키 쌍 만들기.** 은행이 직접 만든다(2.3 `generate_keypair`). **개인키**는 은행 서버의 환경 변수에만 두고 허브를 포함해 누구에게도 주지 않는다. **공개키**만 허브에 등록한다. 만든 뒤 2.3의 예시 1·2와 2.5의 예시 3 값이 자기 구현과 같은지 먼저 확인한다.
 
@@ -360,7 +704,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 ---
 
-## 3. 은행 → 허브 API
+## 3. 은행 → 허브 API [필수]
 
 기본 주소: `https://clearing-hub.ai-agent-develop.cloud/v1` (API 문서: `https://clearing-hub.ai-agent-develop.cloud/docs`)
 
@@ -378,11 +722,11 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `POST /v1/accounts/lookup` 본인 계좌 조회 (선택) | 서명 | 9.2 |
 | `GET /v1/reserve` 예치금 | 서명 | 10.2 |
 | `GET /v1/settlements`, `GET /v1/settlements/{run_id}` 정산 | 서명 | 10.4, 10.5 |
-| `POST /v1/settlements/{run_id}/ack`, `POST /v1/settlements/{run_id}/dispute` 대사 결과 보내기 | 서명 | 10.8 |
+| `POST /v1/settlements/{run_id}/ack`, `POST /v1/settlements/{run_id}/dispute` 대사 결과 보내기 | 서명 | 10.7 |
 
 "서명"은 2절의 헤더(`X-Bank-Code`, `X-Api-Key`, `X-Timestamp`, `X-Signature`)가 필요하다는 뜻이다. 모든 `/v1` 응답(2xx·4xx)에는 허브의 응답 서명이 붙는다 (2.5).
 
-### 3.1 참가 은행 목록 `GET /v1/banks`
+### 3.1 참가 은행 목록 `GET /v1/banks` [필수]
 
 화면의 "받는 은행" 선택에 쓴다. 인증 필요.
 
@@ -392,7 +736,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 - 활성 은행만 나온다. **요청한 은행 자신도 목록에 들어 있다.** 받는 은행으로 자기 은행을 고르면 이체가 `SAME_BANK`로 거절되므로, 화면에 보여 줄 때 자기 은행을 빼거나 자체 이체로 돌린다.
 
-### 3.2 수취 조회 `POST /v1/inquiry`
+### 3.2 수취 조회 `POST /v1/inquiry` [필수]
 
 받는 사람 이름을 확인 화면에 보여 주기 위한 것. 돈은 움직이지 않는다.
 
@@ -430,7 +774,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 `holder_name`은 받는 은행이 준 값을 **가리지 않고** 그대로 전달한다 (9.6). 화면에 가려서 보여 줄지(`김*수`)는 보내는 은행이 정한다.
 
-### 3.3 이체 요청 `POST /v1/transfers`
+### 3.3 이체 요청 `POST /v1/transfers` [필수]
 
 **보내는 은행은 이 요청 전에 자기 DB에서 출금을 끝내고**(중간 계정으로 옮기고) 이체 상태를 "처리 중"으로 저장해 둔다. 허브 응답에 따라 완료 또는 되돌림한다 (6절).
 
@@ -496,7 +840,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 이 API의 성공·결과 응답은 위 세 가지(200 `COMPLETED`, 202 `PENDING`, 4xx `FAILED`)뿐이다. 재전송했을 때 허브가 아직 받는 은행을 부르는 중이거나 결과를 끝내 모르는 거래(3.4의 `ACCEPTED`·`DELIVERING`·`UNKNOWN`)도 202 `PENDING`으로 답한다. 할 일이 같기 때문이다: 되돌리지 말고 3.4로 확인한다.
 
-### 3.4 결과 조회 `GET /v1/transfers/{transfer_id}`
+### 3.4 결과 조회 `GET /v1/transfers/{transfer_id}` [필수]
 
 자기 은행이 보낸 거래만 조회할 수 있다.
 
@@ -525,7 +869,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `ACCEPTED` / `DELIVERING` / `PENDING` | 기다렸다가 다시 조회 (권장: 30초 간격) |
 | `COMPLETED` | 이체 완료 처리 |
 | `FAILED` | 출금 되돌림 |
-| `UNKNOWN` | 허브가 재시도를 다 했는데도 결과를 모름 (접수 후 약 10분, 8절 7). 허브는 이 거래를 **더 이상 자동으로 확인하지 않고** 관리자가 받는 은행과 직접 맞춰 본다. 되돌리지 말고 6절의 "30분 뒤" 규칙을 따른다. 관리자가 정리하면 아래 중 하나로 바뀐다 |
+| `UNKNOWN` | 허브가 재시도를 다 했는데도 결과를 모름 (접수 후 약 10분, 부록 A 7). 허브는 이 거래를 **더 이상 자동으로 확인하지 않고** 관리자가 받는 은행과 직접 맞춰 본다. 되돌리지 말고 6절의 "30분 뒤" 규칙을 따른다. 관리자가 정리하면 아래 중 하나로 바뀐다 |
 
 관리자가 `UNKNOWN`을 정리하는 방법은 두 가지다. 보내는 은행은 어느 쪽이든 계속 조회하다가 바뀐 상태대로 마무리하면 된다.
 
@@ -538,7 +882,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 다른 은행이 보낸 거래의 `transfer_id`로 조회하면 `403 FORBIDDEN`이다. 인증이 틀리면 401이다 (2절).
 
-### 3.5 셀프 등록 `POST /v1/banks/register` (인증 없음)
+### 3.5 셀프 등록 `POST /v1/banks/register` (인증 없음) [필수]
 
 허브 관리자에게 받은 **초대 코드**로 은행이 스스로 등록한다. 은행 코드는 허브가 정해 준다. 서명하지 않는 유일한 은행 → 허브 요청이다 (아직 키가 등록되지 않았으므로. 초대 코드가 인증을 대신한다).
 
@@ -592,7 +936,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `VALIDATION_ERROR` | 422 | 위 필드 표 위반 (`public_key` 형식 포함). 초대 코드는 쓰이지 않은 채로 남는다 |
 | `BANK_CODE_EXHAUSTED` | 409 | 배정할 은행 코드가 없음 (허브 관리자에게 알린다) |
 
-### 3.6 내 등록 정보 `GET /v1/me`, `PATCH /v1/me`, `POST /v1/me/ping`
+### 3.6 내 등록 정보 `GET /v1/me`, `PATCH /v1/me`, `POST /v1/me/ping` [선택]
 
 인증 필요(2절). 자기 은행의 것만 보고 바꾼다.
 
@@ -633,7 +977,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 `body`는 응답 서명이 틀려도 받은 그대로 보여 준다 (고칠 곳을 찾게).
 
-### 3.7 셀프 시험 (받는 쪽) `POST /v1/test-receive`, `/resend`, `/status`
+### 3.7 셀프 시험 (받는 쪽) `POST /v1/test-receive`, `/resend`, `/status` [선택]
 
 인증 필요(2절). 허브가 가짜 은행 `902`(SimBank) 명의로 **내 은행에** 시험 이체를 만들어, 내 4.2·4.3 구현을 허브 관리자 없이 시험한다. 허브는 이 이체를 보통 이체와 똑같이 처리한다 (상태 머신·재시도·응답 서명 검증·증거 보관). 모든 결과에는 **내 서버가 실제로 돌려준 것**(`receiver_reply`)이 붙어 바로 고칠 곳을 찾을 수 있다.
 
@@ -701,7 +1045,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `FORBIDDEN` | 403 | `resend`·`status`: 내 은행으로 간 셀프 시험 거래가 아님 |
 | `TRANSFER_NOT_COMPLETED` | 409 | `resend`: 그 거래가 `COMPLETED`가 아님 |
 
-### 3.8 연동 진단 (`GET /v1/diagnose/failures`, 401 `hint`)
+### 3.8 연동 진단 (`GET /v1/diagnose/failures`, 401 `hint`) [선택]
 
 401로 막혔을 때 원인을 허브가 찾아 준다. 보는 곳은 둘이다.
 
@@ -766,14 +1110,14 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 ---
 
-## 4. 허브 → 은행 API (은행이 구현할 것)
+## 4. 허브 → 은행 API (은행이 구현할 것) [필수]
 
 은행은 허브에 **`base_url`** 하나를 등록한다 (예: `https://b-bank.example.com/interbank`, 3.5). 허브는 그 아래 경로를 부른다. 은행이 할 것은 둘이다.
 
 1. 요청의 2절 서명을 **허브 공개키**(2.6)로 검증한다 (`X-Bank-Code: "000"`, `PATH`는 `base_url` 뒤의 부분). 틀리면 401.
 2. **자기 응답(2xx·4xx)에 응답 서명(2.5)을 붙인다.** 응답 서명이 없거나 틀리면 허브는 그 응답을 "응답 없음"으로 본다 (2xx도 입금 완료로 보지 않고, 4xx도 거절로 보지 않는다).
 
-### 4.1 수취 조회 `POST {base_url}/inquiry`
+### 4.1 수취 조회 `POST {base_url}/inquiry` [필수]
 
 요청
 ```json
@@ -788,7 +1132,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 - `holder_name`은 **필수**다. 200인데 `holder_name`이 없거나 비어 있으면, 허브는 보내는 은행에 `502 RECEIVER_ERROR`로 답한다.
 - 오류: `404` `ACCOUNT_NOT_FOUND`, `400` `ACCOUNT_INACTIVE`. 이 밖의 4xx는 허브가 `RECEIVER_ERROR`로 바꾼다 (5절).
 
-### 4.2 입금 `POST {base_url}/receive`
+### 4.2 입금 `POST {base_url}/receive` [필수]
 
 요청
 ```json
@@ -828,7 +1172,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 5. 일시 장애는 `5xx`. 허브는 5xx와 타임아웃만 재시도하고 4xx는 재시도하지 않는다. **4xx를 준 거래는 저장하지 않는다.** 그래야 4.3이 404를 준다
 6. 거래내역에는 보낸 사람 이름과 보낸 은행 이름을 남긴다 (`"AvengersBank 홍길동"`).
 
-### 4.3 입금 확인 `GET {base_url}/receive/{transfer_id}`
+### 4.3 입금 확인 `GET {base_url}/receive/{transfer_id}` [필수]
 
 허브가 응답을 못 받은 거래를 확인할 때 부른다.
 
@@ -841,11 +1185,11 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 응답 `404`: 그 ID로 입금한 적 없음 (`TRANSFER_NOT_FOUND`). 허브는 4.2를 다시 보낸다.
 
-**이 API의 응답은 위 둘(200 `COMPLETED`, 404 `TRANSFER_NOT_FOUND`)뿐이다.** 입금하지 않은 거래(4.2에서 4xx로 거절했거나 아직 처리 중)는 모두 404로 답한다. 허브는 200이어도 `status`가 `COMPLETED`가 아니면, 그리고 5xx·타임아웃이면 "확인 못 함"으로 보고 1분 뒤 다시 묻는다 (8절 7).
+**이 API의 응답은 위 둘(200 `COMPLETED`, 404 `TRANSFER_NOT_FOUND`)뿐이다.** 입금하지 않은 거래(4.2에서 4xx로 거절했거나 아직 처리 중)는 모두 404로 답한다. 허브는 200이어도 `status`가 `COMPLETED`가 아니면, 그리고 5xx·타임아웃이면 "확인 못 함"으로 보고 1분 뒤 다시 묻는다 (부록 A 7).
 
 ---
 
-## 5. 오류 형식
+## 5. 오류 형식 [필수]
 
 모든 오류는 HTTP 4xx/5xx + 다음 본문.
 
@@ -885,8 +1229,8 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `RECEIVER_ERROR` | 502 / 400 | 받는 은행 5xx: 이체는 `PENDING`으로 재시도, 수취 조회는 즉시 502. 받는 은행이 **허브의 서명·인증을 거절**(401·403, 허브 ↔ 받는 은행 설정 문제)한 경우도 이 코드다: 수취 조회는 502, 이체는 입금 전 거절이라 `FAILED`(400)로 끝나고 보내는 은행은 출금을 되돌린다. 보내는 은행 자신의 서명 오류(`SIGNATURE_INVALID`)와 헷갈리지 않게 받는 은행의 인증 오류 코드는 그대로 넘기지 않는다 | 허브 |
 | `ACCOUNT_REF_INVALID` | 400 | `to_account_ref`가 만료됐거나 다른 은행 것, `to_bank`와 안 맞음 (9.3) | 허브 |
 | `TOO_MANY_LOOKUPS` | 429 | 본인 계좌 조회 횟수 초과 (9.2) | 허브 |
-| `SETTLEMENT_NOT_FOUND` | 404 | 없는 정산 `run_id` (10.5, 10.8) | 허브 |
-| `SETTLEMENT_NOT_DRAFT` | 409 | `DRAFT`가 아닌(`SETTLED`·`CANCELLED`) run에 ack·dispute (10.8). 본문에 `run_id`가 붙는다 | 허브 |
+| `SETTLEMENT_NOT_FOUND` | 404 | 없는 정산 `run_id` (10.5, 10.7) | 허브 |
+| `SETTLEMENT_NOT_DRAFT` | 409 | `DRAFT`가 아닌(`SETTLED`·`CANCELLED`) run에 ack·dispute (10.7). 본문에 `run_id`가 붙는다 | 허브 |
 | `TOO_MANY_TESTS` | 429 | 셀프 시험 하루 횟수 초과 (3.7) | 허브 |
 | `SIM_BANK_UNAVAILABLE` | 503 | 셀프 시험에 쓸 가짜 은행을 지금 쓸 수 없음 (3.7) | 허브 |
 | `TRANSFER_NOT_COMPLETED` | 409 | 셀프 시험 재전송(`resend`)을 `COMPLETED`가 아닌 거래에 요청 (3.7) | 허브 |
@@ -900,7 +1244,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 ---
 
-## 6. 보내는 은행의 처리 순서 (권장)
+## 6. 보내는 은행의 처리 순서 [필수]
 
 ```
 1. 사용자 확인·승인, 자체 FDS 검사
@@ -932,7 +1276,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 ---
 
-## 7. 연동 절차
+## 7. 연동 절차 [필수]
 
 허브 관리자가 하는 일은 1번(초대 코드와 지문 보내기)뿐이다. 나머지는 은행이 스스로 한다.
 
@@ -957,42 +1301,19 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
    1. **응답 본문의 `hint`** (5절). 허브가 실패한 요청을 흔한 실수 변형으로 다시 계산해 찾은 1순위 원인과 고칠 곳이다. `원인 후보(확인됨)`이면 그것이 원인이다
    2. 그래도 모르겠으면 **`GET /v1/diagnose/failures`**(서명 없이 `X-Bank-Code`·`X-Api-Key`)로 실패 전체와 가설 목록을 본다. 1순위가 `verified: false`면 2·3순위 가설과 `detail`의 실제 값을 내 코드와 하나씩 맞춰 본다
    3. 그래도 안 되면 허브 관리자에게 문의한다. `hint`가 없는 401(API 키가 틀림)이나 `/v1/diagnose/failures` 자체가 401이면 API 키 문제이니 바로 관리자에게 문의한다
-9. **참고 구현**: 이 문서의 2.3·2.5(서명)와 9.1(가상 CI) 코드만으로 충분하다. 허브 저장소를 받았다면 [`src/bank_sim/main.py`](../src/bank_sim/main.py)(4절·9.4 API를 구현한 가짜 은행)와 [`src/clearing_hub/core/signing.py`](../src/clearing_hub/core/signing.py)도 볼 수 있다. `bank_sim`은 허브 패키지의 `signing`·`response_signing`을 import하므로, 따로 가져갈 때는 2.3·2.5의 참고 구현으로 바꾼다.
+9. **참고 구현**: 이 문서의 빠른 시작(서명 함수·받는 쪽 최소 구현·보내는 쪽 호출), 2.3·2.5(서명), 9.1(가상 CI) 코드만으로 충분하다. 허브 저장소를 받았다면 [`examples/README.md`](../examples/README.md)에 언어별 참고 구현 목록이 있다: Python은 [`src/bank_sim/main.py`](../src/bank_sim/main.py)(4절·9.4 API를 구현한 가짜 은행), Node.js는 `examples/node-bank`(준비 중). `bank_sim`은 허브 패키지의 `signing`·`response_signing`을 import하므로, 따로 가져갈 때는 빠른 시작 2단계의 `signing.py`로 바꾼다.
 
 허브 관리자가 직접 등록할 수도 있다 (관리자 API `POST /admin/banks`, 코드를 정해서. 시연용 은행 등). 그때도 공개키는 은행이 만들어 준다.
 
 ---
 
-## 8. 합의가 필요한 것 (v1.0 확정 전에 정한다)
+## 8. (부록 A로 옮김)
 
-| # | 항목 | 초안 | 결정 |
-|---|---|---|---|
-| 1 | 은행 코드 배정 | 허브가 `901`부터 순서대로 배정 | 확정 (v1.0): 셀프 등록(3.5) 때 허브가 `903`부터 비어 있는 가장 작은 코드를 배정한다. 관리자 직접 등록(`POST /admin/banks`)은 코드를 정해 넣는다(시연용 등). `901` AvengersBank, `902` 가짜 은행 SimBank |
-| 2 | 계좌번호 형식 | 은행별 자유, 허브는 검사 안 함 | 확정 (v0.4): 허브는 1~50자 문자열인지만 본다 |
-| 3 | 허브 → 은행 호출의 `X-Api-Key` | 생략 (서명만으로 확인) / 은행이 허브에 키 발급 | 확정 (v0.4, v1.0 갱신): 생략. 허브는 `X-Bank-Code: 000` + 허브 개인키 Ed25519 서명만 보낸다. 은행은 허브 공개키(2.6)로 검증하므로 허브에 비밀을 줄 필요가 없다 |
-| 4 | `base_url` 아래 경로 이름 (`/inquiry`, `/receive`) | 고정 | 확정 (v0.4): `/inquiry`, `/receive`, `/receive/{transfer_id}`, `/accounts`(9.4) |
-| 5 | 1회 이체 상한 | 1억 원 (허브), 받는 은행 한도는 은행 자율 | 확정 (v0.4): 허브 1억 원(`MAX_TRANSFER_AMOUNT`), 받는 은행은 자율(`LIMIT_EXCEEDED`) |
-| 6 | 받는 은행이 거절할 수 있는 조건 | 계좌 없음·정지·한도 초과만 | 허브는 받는 은행의 4xx를 코드와 상관없이 거절(`FAILED`)로 처리한다. 조건 목록은 미정 |
-| 7 | 재시도 간격·횟수 | 1분 × 10회, 이후 `UNKNOWN` | 확정 (v0.4): 1분 × 10회(`RETRY_INTERVAL_SECONDS`·`RETRY_MAX_COUNT`), 이후 `UNKNOWN` |
-| 8 | 정산 시각·방식 | 매일 00:05 KST, 전날 `COMPLETED` 상계, 표시만 | 확정 (v0.6, v1.1 갱신): 10절. 매일 00:05 KST 자동 DRAFT, 모의 예치금 원장. 대사(10.6)는 은행 선택. 확정은 은행 확인(10.8): 포지션이 있는 은행이 모두 ack하면 즉시, 아니면 09:00 KST에 dispute가 없으면 자동. dispute는 허브 관리자가 판정 |
-| 9 | 허브 도메인, 테스트 환경 주소 | 허브: `https://clearing-hub.ai-agent-develop.cloud`. 별도 테스트 환경 없이 가짜 은행 `902`로 시험 (7절 6) | 확정 (2026-11-05 배포) |
-| 10 | 사기 신고 계좌 공유 (선택) | v1.1 | |
-| 11 | 본인 계좌 조회(9절) 참여 | 선택. 안 만든 은행은 결과에서 `UNSUPPORTED`로 빠진다 | 확정 (v0.4): 허브는 9.4의 404를 `UNSUPPORTED`로 처리. AvengersBank·가짜 은행은 참여 |
-| 12 | 가상 CI 재료 | 이름 + 생년월일 + 휴대폰번호 (9.1) | 확정 (v0.4): 9.1 정규화 규칙대로 허브·AvengersBank·가짜 은행이 같은 값을 만든다 |
-| 13 | `CI_KEY` 관리 | 허브 관리자가 하나 만들어 개별 경로로 전달. 유출 시 전 은행이 CI를 다시 계산 | 키 생성 완료 (2026-11-05, 허브 서버 보관, 운영 가짜 은행 `902`에 적용). 초대 코드와 같은 경로로 받는다 (7절 1). 9.1의 예시 키 `example-ci-key-change-me`는 검증용이며 운영에서는 쓰지 않는다 |
-| 14 | 다른 은행 계좌를 보내는 은행에 주는 방식 | `account_ref`(허브 보관, 30분) / 전체 계좌번호 그대로 (9.3) | 확정 (v0.4): `account_ref`, 30분(`ACCOUNT_REF_TTL_SECONDS`) |
-| 15 | 본인 계좌 조회 횟수 제한 | 은행별 같은 CI 하루 10회 | 확정 (v0.4): 요청 은행별 같은 CI 24시간 10회(`LOOKUP_DAILY_LIMIT`), 넘으면 `TOO_MANY_LOOKUPS` |
-| 16 | 추적 ID `X-Request-ID` (2.4) | 선택, 서명 제외, 허브가 받는 은행까지 전달 | 확정 (v0.4): 허브·AvengersBank·가짜 은행 구현 |
-| 17 | 서명 대상 | 본문만 / 메서드·경로 포함 | 확정 (v0.5): 메서드와 규격 경로를 포함 (2.2). 허브 → 은행은 `base_url` 뒤의 경로. 예전 형식을 받아 주는 기간은 없다. v1.0: 서명 함수는 Ed25519 하나, 응답에도 서명하고 `request_signature`로 요청에 묶는다 (2.5) |
-| 18 | 예치금·순채무한도 (10.2) | 관리자가 은행별로 넣음 | 확정 (v0.6, v1.0 갱신): 예치금 기본 0, 순채무한도 기본 10억(`DEFAULT_NET_DEBIT_CAP`). 등록 직후부터 보낼 수 있고, 관리자가 은행별로 바꾼다 |
-| 19 | 서명 방식 (2절) | 은행별 `hmac` → `both` → `ed25519` 전환 / Ed25519만 | 확정 (v1.0): **Ed25519만.** 연동을 시작한 다른 팀이 없어 전환 기간을 두지 않는다. 허브가 은행의 비밀을 갖지 않고, 은행은 처음부터 하나만 만든다. HMAC·서명 모드는 규격에서 뺐다 |
-| 20 | 셀프 등록·기본 한도 (3.5, 10.2) | 관리자가 은행마다 등록·키 발급·한도 입력 / 초대 코드로 은행이 스스로 | 확정 (v1.0): 관리자는 초대 코드(7일, 한 번)와 허브 공개키 지문만 보낸다. 은행이 `POST /v1/banks/register`로 등록하고 `/v1/me`로 주소를 고친다. 기본 한도 10억. 정산 자동 확정·은행 셀프 시험은 v1.1(8절 21) |
-| 21 | 관리자 손 줄이기 (3.7, 10.8) | 관리자가 매일 확정하고 받는 쪽 시험 이체를 보내 줌 / 은행이 스스로 | 확정 (v1.1): 은행이 대사 결과를 ack·dispute로 보내 자동 확정(전원 ack 즉시, 09:00 KST 마감, dispute는 관리자 판정). 받는 쪽은 셀프 시험 API로 은행이 직접. 허브 관리자는 알림(dispute·`OVERDUE`·`UNKNOWN`·ping 실패 등)을 받고 대응한다 |
-| 22 | 연동 진단 (3.8) | 401 문의마다 관리자가 은행의 서명 코드를 같이 봄 / 허브가 실패를 기록해 원인을 진단 | 확정 (v1.2): 허브가 인증 실패를 기록하고 **규칙으로** 서명을 다시 계산해 원인을 찾는다. 식별된 은행의 401에는 1순위 가설 `hint`를 붙이고, 자세한 목록은 `GET /v1/diagnose/failures`. 서명이 안 되는 상태에서 쓰므로 API 키만으로 식별하고 자기 실패만 보여 준다 |
+v1.2.1부터 "합의가 필요한 것"은 맨 뒤 **부록 A 합의 기록**으로 옮겼다. 9·10절의 번호는 그대로다.
 
 ---
 
-## 9. 본인 명의 계좌 조회 (선택 기능)
+## 9. 본인 명의 계좌 조회 [선택]
 
 고객 동의를 받아, 같은 사람 명의로 **다른 참가 은행에 있는 계좌 목록**을 가져온다. 쓰임새는 두 가지다.
 
@@ -1001,7 +1322,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 
 이체 연동(3·4절)과 독립된 **선택 기능**이다. 허브와 가짜 은행 `902`에는 구현돼 있다 (v0.3). 9.4를 만들지 않은 은행도 이체는 그대로 된다. 잔액·거래내역은 다루지 않는다.
 
-### 9.1 가상 CI (사람 식별자)
+### 9.1 가상 CI (사람 식별자) [선택]
 
 실제 금융권은 본인인증 기관이 주는 CI(연계정보)로 같은 사람을 찾는다. 이 프로젝트에서는 각 은행이 같은 규칙으로 계산하는 **가상 CI**를 쓴다.
 
@@ -1016,7 +1337,7 @@ ci       = hex( HMAC-SHA256( key = CI_KEY, message = UTF-8 bytes of material ) )
 | 생년월일 | `YYYYMMDD` 8자리 | `19900101` |
 | 휴대폰번호 | 숫자만 (하이픈·`+82` 없이 `010`으로 시작) | `01012345678` |
 
-- `CI_KEY`는 허브 관리자가 하나 만들어 모든 참가 은행에 초대 코드와 같은 방법(개별 경로)으로 전달한다 (8절 13). 은행마다 다르면 같은 사람을 찾지 못한다.
+- `CI_KEY`는 허브 관리자가 하나 만들어 모든 참가 은행에 초대 코드와 같은 방법(개별 경로)으로 전달한다 (부록 A 13). 은행마다 다르면 같은 사람을 찾지 못한다.
 - 은행은 회원가입·정보 변경 때 `ci`를 계산해 **고객 테이블에 저장하고 인덱스**를 건다. 원본 재료(생년월일·휴대폰번호)는 은행 밖으로 보내지 않는다. 허브도 원본을 받지 않는다.
 - 휴대폰번호가 바뀌면 `ci`도 바뀐다. 은행은 고객 정보가 바뀔 때 다시 계산한다.
 
@@ -1038,7 +1359,7 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
     return hmac.new(ci_key.encode(), material.encode(), hashlib.sha256).hexdigest()
 ```
 
-### 9.2 본인 계좌 조회 `POST /v1/accounts/lookup` (은행 → 허브)
+### 9.2 본인 계좌 조회 `POST /v1/accounts/lookup` (은행 → 허브) [선택]
 
 보내는 은행이 **고객 동의를 받은 뒤** 부른다. 허브는 요청한 은행을 뺀 활성 참가 은행 전체에 9.4를 **동시에** 보내고(은행별 5초), 결과를 모아 돌려준다.
 
@@ -1088,11 +1409,11 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 `account_masked`는 허브가 실제 계좌번호에서 앞 3자와 끝 4자만 남기고 가운데의 하이픈이 아닌 글자를 `*`로 바꾼 값이다 (`110-123-0001` → `110-***-0001`). 계좌번호가 8자보다 짧으면 끝 4자만 남긴다.
 
 - 허브는 이 조회를 재시도하지 않는다. 화면에는 "일부 은행은 불러오지 못했습니다"를 보여 주고 다시 시도하게 한다.
-- 오류: `VALIDATION_ERROR`(422, `ci`가 64자 16진수가 아님·`consent_id` 없음), `TOO_MANY_LOOKUPS`(429, 8절 15의 횟수 초과)
+- 오류: `VALIDATION_ERROR`(422, `ci`가 64자 16진수가 아님·`consent_id` 없음), `TOO_MANY_LOOKUPS`(429, 부록 A 15의 횟수 초과)
 
-### 9.3 `account_ref`로 이체하기
+### 9.3 `account_ref`로 이체하기 [선택]
 
-허브는 다른 은행의 **전체 계좌번호를 보내는 은행에 주지 않는다** (8절 14). 대신 `account_ref`를 준다.
+허브는 다른 은행의 **전체 계좌번호를 보내는 은행에 주지 않는다** (부록 A 14). 대신 `account_ref`를 준다.
 
 - `account_ref`는 허브가 만든 불투명한 문자열이다. 허브만 실제 계좌번호를 알고 있다
 - **조회한 은행만**, 발급 후 **30분** 동안 쓸 수 있다. 여러 번 써도 된다 (같은 계좌로 두 번 보내기)
@@ -1106,7 +1427,7 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 - 만료됐거나 다른 은행이 받은 ref, `to_bank`가 다른 ref → `ACCOUNT_REF_INVALID`(400). 보내는 은행은 9.2를 다시 부른다
 - 3.4 결과 조회에는 원래부터 받는 계좌번호가 나오지 않는다
 
-### 9.4 계좌 목록 `POST {base_url}/accounts` (허브 → 은행, 은행이 구현할 것)
+### 9.4 계좌 목록 `POST {base_url}/accounts` (허브 → 은행, 은행이 구현할 것) [선택]
 
 4절처럼 은행이 만든다. 요청에는 2절 서명이 붙는다 (`X-Bank-Code: "000"`).
 
@@ -1150,27 +1471,27 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 
 자기 은행에 같은 이름·생년월일·휴대폰번호의 고객을 만들어 두면, 그 고객으로 "내 다른 은행 계좌로 보내기"까지 끝까지 시험할 수 있다.
 
-### 9.5 허브가 남기는 것과 남기지 않는 것
+### 9.5 허브가 남기는 것과 남기지 않는 것 [선택]
 
 | 남긴다 | 남기지 않는다 |
 |---|---|
 | `lookup_id`, 요청 은행, `consent_id`, 시각, 은행별 결과·계좌 수 | `ci` 원문 (조회 횟수 제한에는 `SHA-256(ci)`만 하루 동안 쓴다) |
 | `account_ref` ↔ 계좌번호 (30분 뒤 삭제) | 생년월일·휴대폰번호 (애초에 받지 않는다) |
 
-### 9.6 한계 (이 프로젝트에서 받아들이는 것)
+### 9.6 한계 (이 프로젝트에서 받아들이는 것) [선택]
 
-- `CI_KEY`를 가진 은행은 누군가의 이름·생년월일·휴대폰번호만 알면 그 사람의 `ci`를 만들어 조회할 수 있다. 실제 CI도 성격이 같아서 동의 기록(`consent_id`), 조회 기록, 횟수 제한으로 막는다. 허브 관리자는 조회 기록을 보고 은행에 동의 기록을 요구할 수 있다
+- `CI_KEY`를 가진 은행은 이름·생년월일·휴대폰번호만 알면 그 사람의 `ci`를 만들어 조회할 수 있다. 실제 CI와 같은 성격이라 동의 기록(`consent_id`)·조회 기록·횟수 제한으로 막고, 허브 관리자는 조회 기록으로 동의 기록을 요구할 수 있다
 - 이름 표기가 은행마다 다르면(한글·영문, 개명) 같은 사람을 찾지 못한다
-- 가상 CI는 본인인증이 아니다. 은행은 9.2를 부르기 전에 자기 로그인·추가 인증으로 고객 본인임을 확인해야 한다
-- 수취 조회(3.2)는 예금주 이름 전체를 돌려준다. 실제 금융권처럼 이름을 가리지 않으므로, 참가 은행은 아무 계좌번호나 넣어 이름을 알아낼 수 있다. 이 프로젝트에서는 참가 은행끼리 서로 믿는 것으로 보고 받아들인다. 화면에 가려서 보여 줄지는 보내는 은행이 정한다
+- 가상 CI는 본인인증이 아니다. 9.2를 부르기 전에 은행이 자기 로그인·추가 인증으로 고객 본인임을 확인한다
+- 수취 조회(3.2)는 예금주 이름을 가리지 않고 준다 (아무 계좌번호로 이름을 알아낼 수 있다). 참가 은행끼리 믿는 것으로 보고 받아들이며, 화면에서 가릴지는 보내는 은행이 정한다
 
 ---
 
-## 10. 정산 (선택 참여, 이체에는 영향 없음)
+## 10. 정산 [선택] (10.2만 [알아야 함])
 
 은행이 이 절의 API를 하나도 부르지 않아도 이체(3·4절)는 그대로 된다. 허브가 은행을 새로 부르는 일도 없다 (4절은 바뀌지 않는다). 다만 **10.2의 순채무한도 검사는 모든 은행에 적용된다**: 예치금과 한도가 모자라면 송금이 `LIMIT_EXCEEDED`로 거절된다.
 
-### 10.1 왜 있는가
+### 10.1 왜 있는가 [선택]
 
 이체에서 받는 은행은 고객 계좌에 **즉시** 입금한다(4.2). 그런데 은행 사이의 돈은 그 순간 움직이지 않는다. 받는 은행이 보내는 은행에게 외상을 준 셈이다. 실제 금융망에서는 금융결제원이 하루치 거래를 은행별로 상계(받을 돈 − 줄 돈)하고, 한국은행이 각 은행의 당좌예금 사이에서 그 차액만 옮겨 외상을 갚는다.
 
@@ -1179,12 +1500,12 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 1. 허브 관리자가 은행마다 예치금(당좌예금 역할)을 넣어 둔다
 2. 접수 때 보내는 은행이 갚을 수 있는 만큼만 보내게 한다 (10.2)
 3. 매일 하루치 거래를 은행별 차액 하나로 상계한다 (10.3)
-4. 은행이 자기 몫의 거래 목록(대사 파일)을 받아 자기 장부와 맞춰 보고 결과를 보낸다 (10.4~10.6, 10.8)
+4. 은행이 자기 몫의 거래 목록(대사 파일)을 받아 자기 장부와 맞춰 보고 결과를 보낸다 (10.4~10.6, 10.7)
 5. 은행들이 맞다고 하면(또는 확정 마감까지 이의가 없으면) 확정되고, 그 차액만큼 예치금이 옮겨진다
 
 **실제 돈은 움직이지 않는다.** 예치금은 허브 DB의 숫자이고, 넣고 빼는 것은 허브 관리자만 한다. 이 절의 목적은 "받았다", "보냈다"는 말이 아니라 양쪽 장부의 숫자로 이체를 확인하는 것이다. 받는 은행이 입금 없이 200을 주었거나 보내는 은행이 출금 없이 보냈으면 10.6의 대사에서 드러난다.
 
-### 10.2 예치금과 순채무한도
+### 10.2 예치금과 순채무한도 [알아야 함]
 
 은행마다 두 값이 있다. 허브 관리자가 바꾼다.
 
@@ -1218,7 +1539,7 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 - 받은 돈이 더 많으면 음수다. 그만큼 예치금 + 한도보다 더 보낼 수 있다
 - 확정되지 않은 정산(`DRAFT`)에 들어간 거래도 아직 센다. 확정되는 순간 순채무에서 빠지고 같은 금액이 예치금에 반영되므로, 확정 전후로 보낼 수 있는 금액(`available`)은 변하지 않는다
 
-#### 내 예치금 조회 `GET /v1/reserve`
+#### 내 예치금 조회 `GET /v1/reserve` [선택]
 
 인증 필요(2절). 본문 없는 GET이고 쿼리는 없다. 요청한 은행 자신의 것만 나온다.
 
@@ -1237,14 +1558,14 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 
 `available`이 보내려는 금액보다 작으면 그 이체는 `LIMIT_EXCEEDED`로 거절된다. `available`이 0 이하면 받기만 되고 보내기는 모두 막힌 상태다 (`OVERDUE` 등). 허브 관리자에게 예치금을 넣어 달라고 요청한다.
 
-### 10.3 정산 회차 (run)
+### 10.3 정산 회차 (run) [선택]
 
 허브는 하루치 거래를 **정산 회차**(run) 하나로 묶어 은행별 차액을 계산한다.
 
 ```
 매일 00:05 KST    허브가 어제(KST) 정산일로 run을 만든다 → DRAFT
                     대상: 마감(오늘 00:00 KST) 전에 COMPLETED 된 거래 중 아직 어느 run에도 들어가지 않은 것 전부
-(대사 기간)        은행이 10.5로 자기 몫을 받아 맞춰 보고(10.6) 결과를 보낸다 (10.8 ack / dispute)
+(대사 기간)        은행이 10.5로 자기 몫을 받아 맞춰 보고(10.6) 결과를 보낸다 (10.7 ack / dispute)
 자동 확정          → SETTLED: 포지션이 있는 은행이 모두 ack하면 그 즉시,
                      아니면 매일 09:00 KST(확정 마감)에 dispute가 없으면. 은행별 차액이 예치금에 반영된다
 dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 판정해 확정(SETTLED)하거나 취소한다
@@ -1253,7 +1574,7 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 
 | `status` | 뜻 | 은행이 할 일 |
 |---|---|---|
-| `DRAFT` | 차액만 계산했다. 예치금은 아직 그대로 | 맞춰 보고 결과(ack·dispute, 10.8)를 보낸다. 확정될 때까지 다시 확인 |
+| `DRAFT` | 차액만 계산했다. 예치금은 아직 그대로 | 맞춰 보고 결과(ack·dispute, 10.7)를 보낸다. 확정될 때까지 다시 확인 |
 | `SETTLED` | 예치금에 반영했다. 더 바뀌지 않는다 | 맞춰 보고, 맞으면 자기 내부 계정을 정리한다 (10.6) |
 | `CANCELLED` | 확정 전에 취소했다 | 무시한다. 그 거래는 다음 run에 다시 나온다 |
 
@@ -1262,7 +1583,7 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 - `COMPLETED`가 아닌 거래(`FAILED`·`PENDING`·`UNKNOWN` 등)는 어느 run에도 들어가지 않는다.
 - `DRAFT`는 동시에 하나만 있다. 확정하지 않은 `DRAFT`가 남아 있으면 그날 배치는 run을 만들지 않고 건너뛴다 (거래는 미정산으로 남아 다음 run에 들어간다). 그래서 `DRAFT`는 항상 가장 최근 run이고, 그보다 앞선 run은 모두 `SETTLED`나 `CANCELLED`다.
 - 거래가 하나도 없는 날에도 매일 배치는 run을 만들고, 대사할 것이 없으므로 바로 `SETTLED`로 확정한다.
-- 확정 시각은 10.8의 규칙대로다: 포지션이 있는 은행이 모두 ack하면 그 즉시, 아니면 매일 09:00 KST에 dispute가 없으면. dispute가 있으면 허브 관리자가 판정할 때까지 `DRAFT`로 남고, 그동안 매일 배치는 건너뛴다 (8절 8).
+- 확정 시각은 10.7의 규칙대로다: 포지션이 있는 은행이 모두 ack하면 그 즉시, 아니면 매일 09:00 KST에 dispute가 없으면. dispute가 있으면 허브 관리자가 판정할 때까지 `DRAFT`로 남고, 그동안 매일 배치는 건너뛴다 (부록 A 8).
 
 **부호와 결과**
 
@@ -1278,7 +1599,7 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 | `OVERDRAWN` | 음수지만 −순채무한도 이상 | 한도 안의 마이너스. 송금은 남은 `available` 안에서 계속 된다 |
 | `OVERDUE` | −순채무한도 미만 | 한도를 넘었다. 그래도 반영은 하고, 그 은행의 **송금은 막히고 받기만 된다** (10.2의 검사에 걸린다). 허브 관리자가 예치금을 넣으면 풀린다 |
 
-### 10.4 정산 목록 `GET /v1/settlements`
+### 10.4 정산 목록 `GET /v1/settlements` [선택]
 
 인증 필요(2절). 본문 없는 GET이고 쿼리는 없다 (서명의 `PATH`는 `/v1/settlements`).
 
@@ -1305,7 +1626,7 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 | `settled_at` | 확정 시각. `DRAFT`면 `null` |
 | `net_amount` | 그 run에서 **내** 차액 (10.3). 그 run에 내 거래가 없으면 0 |
 | `result` | **내** 결과 `OK` / `OVERDRAWN` / `OVERDUE`. 확정 전이거나 그 run에 내 거래가 없으면 `null` |
-| `my_ack` | **내가** 보낸 대사 결과 `ACK` / `DISPUTE` (10.8). 아직 안 보냈으면 `null` |
+| `my_ack` | **내가** 보낸 대사 결과 `ACK` / `DISPUTE` (10.7). 아직 안 보냈으면 `null` |
 
 다른 은행의 차액·결과·확인 여부는 나오지 않는다. 내 거래가 없는 run도 목록에 나온다 (`net_amount` 0).
 
@@ -1315,7 +1636,7 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 |---|---|---|
 | `UNAUTHORIZED`·`SIGNATURE_INVALID`·`SIGNATURE_EXPIRED`·`BANK_INACTIVE` | 401 | 요청한 은행의 인증 실패 (2절) |
 
-### 10.5 대사 파일 `GET /v1/settlements/{run_id}`
+### 10.5 대사 파일 `GET /v1/settlements/{run_id}` [선택]
 
 인증 필요(2절). 본문 없는 GET이고 쿼리는 없다 (서명의 `PATH`는 `/v1/settlements/12`처럼 `run_id`까지 넣은 경로).
 
@@ -1377,7 +1698,7 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 | `SETTLEMENT_NOT_FOUND` | 404 | 없는 `run_id` |
 | `VALIDATION_ERROR` | 422 | `run_id`가 정수가 아님 |
 
-### 10.6 은행이 할 일 (대사 절차, 권장)
+### 10.6 은행이 할 일 (대사 절차) [선택]
 
 대사는 "허브가 기록한 내 거래"와 "내 장부의 거래"를 **`transfer_id` 하나하나와 금액으로** 맞춰 보는 일이다. 합계만 비교하면 금액이 같은 서로 다른 거래가 바뀌어 있어도 놓친다.
 
@@ -1399,7 +1720,7 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
    │   (허브는 COMPLETED인데 내가 결과를 아직 못 받음)      3.4로 결과를 확인해 마무리한 뒤 다시 비교한다
    ├ 허브에만 있는 ID, 금액·방향이 다른 ID              → 불일치
    └ 내 쪽에만 있는 ID                                  → 아래 "내 쪽에만 있는 거래"
-3-1. DRAFT면 결과를 한 번 보낸다 (10.8. 같은 결과를 매 주기 다시 보낼 필요는 없다)
+3-1. DRAFT면 결과를 한 번 보낸다 (10.7. 같은 결과를 매 주기 다시 보낼 필요는 없다)
    ├ 일치     → POST /v1/settlements/{run_id}/ack
    │              응답 status가 SETTLED면(포지션이 있는 은행 전원 ack로 즉시 확정) 다음 주기를 기다리지 않고
    │              10.5를 다시 받아 4로 간다
@@ -1419,9 +1740,9 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 
 그래서 다음 run으로 넘겨 두고, 끝난 시각이 `cutoff_at`보다 충분히(예: 1시간) 앞서는데도 그 뒤 run에 계속 없으면 허브 관리자에게 알린다. 관리자가 허브 쪽 거래를 확인한다 (`UNKNOWN`이면 정리한다, 3.4).
 
-**불일치가 났을 때.** dispute를 보내면 그 run은 자동 확정되지 않고 허브 관리자에게 알림이 간다. 허브는 거래 기록을 고치지 않는다. 관리자가 증거(서명된 요청·응답 원문)로 원인을 확인해 **확정**(허브 기록이 맞음. 돈을 바로잡아야 하면 예치금 정정으로)하거나 **취소**(그 거래는 다음 run에 다시 나온다)한다. 은행 쪽 원인을 고쳐 다시 맞춰 보니 맞으면 ack를 다시 보내 dispute를 풀 수 있다 (덮어쓴다, 10.8). 은행은 확정된 결과를 관리자와 맞춘 뒤 그 run의 내부 계정을 직접 정리한다. 한 run이 불일치여도 이체는 계속되지만, 판정 전까지 그 DRAFT가 남아 다음 run은 만들어지지 않는다 (거래는 빠지지 않고 판정 뒤의 run에 들어간다). 이미 `SETTLED`가 된 run(09:00 마감 뒤에 맞춰 본 경우)이 불일치면 dispute를 보낼 수 없으므로 허브 관리자에게 `run_id`와 `transfer_id`를 직접 알린다.
+**불일치가 났을 때.** dispute를 보내면 그 run은 자동 확정되지 않고 허브 관리자에게 알림이 간다. 허브는 거래 기록을 고치지 않는다. 관리자가 증거(서명된 요청·응답 원문)로 원인을 확인해 **확정**(허브 기록이 맞음. 돈을 바로잡아야 하면 예치금 정정으로)하거나 **취소**(그 거래는 다음 run에 다시 나온다)한다. 은행 쪽 원인을 고쳐 다시 맞춰 보니 맞으면 ack를 다시 보내 dispute를 풀 수 있다 (덮어쓴다, 10.7). 은행은 확정된 결과를 관리자와 맞춘 뒤 그 run의 내부 계정을 직접 정리한다. 한 run이 불일치여도 이체는 계속되지만, 판정 전까지 그 DRAFT가 남아 다음 run은 만들어지지 않는다 (거래는 빠지지 않고 판정 뒤의 run에 들어간다). 이미 `SETTLED`가 된 run(09:00 마감 뒤에 맞춰 본 경우)이 불일치면 dispute를 보낼 수 없으므로 허브 관리자에게 `run_id`와 `transfer_id`를 직접 알린다.
 
-### 10.8 대사 결과 보내기 `POST /v1/settlements/{run_id}/ack`, `/dispute`
+### 10.7 대사 결과 보내기 `POST /v1/settlements/{run_id}/ack`, `/dispute` [선택]
 
 인증 필요(2절). 10.6의 비교 결과를 허브에 알린다. **`DRAFT` run에만** 보낸다. 내 결과만 기록된다 (다른 은행의 것은 보지도 바꾸지도 못한다).
 
@@ -1467,13 +1788,44 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 | `SETTLEMENT_NOT_DRAFT` | 409 | `SETTLED`·`CANCELLED` run. 본문에 `run_id`가 붙는다 |
 | `VALIDATION_ERROR` | 422 | `run_id`가 정수가 아님, dispute 필드 표 위반 |
 
-### 10.7 한계 (이 프로젝트에서 받아들이는 것)
+### 10.8 한계 (이 프로젝트에서 받아들이는 것) [선택]
 
-- **모의 예치금**이다. 예치금 숫자는 실제 돈과 무관하고, 넣고 빼는 것은 허브 관리자가 한다. 고객 계좌의 돈은 지금처럼 각 은행 DB에서만 움직인다
-- **손실분담이 없다.** `OVERDUE` 은행이 예치금을 끝내 채우지 않을 때 그 금액을 다른 은행이 나눠 지는 규칙, 담보 처분은 범위 밖이다. 허브는 그 은행의 송금을 막을 뿐이다
-- **허브 운영자를 믿는 구조다** (9.6과 같은 성격). 거래 기록과 예치금 원장이 모두 허브에 있어서, 대사로 은행 쪽의 실수나 속임은 찾을 수 있지만 허브가 기록을 꾸미는 것까지 막지는 못한다. 서명은 Ed25519(2절)라 허브도 은행 명의의 요청을 만들 수 없고, 요청 서명과 응답 서명(2.5)으로 "보낸 사실"과 "답한 사실"을 제3자에게 증명할 수 있다. 다만 허브가 거래를 빠뜨리거나 기록을 지우는 것까지 막지는 못한다 (은행이 서명된 원문을 보관해 대사 때 맞춰 본다)
-- dispute가 판정되기 전까지는 확정이 늦어진다 (10.8). 그동안 `DRAFT`의 거래는 미정산 순채무(10.2)에 계속 들어 있고, 매일 배치는 새 run을 만들지 않는다
-- 자동 확정은 ack하지 않은 은행이 있어도 09:00 KST에 된다. 대사를 늦게 하는 은행은 `SETTLED`가 된 run을 맞춰 보게 되고, 그때 불일치는 관리자에게 직접 알려야 한다 (10.6)
+- **모의 예치금**이다. 숫자는 실제 돈과 무관하고 넣고 빼는 것은 허브 관리자가 한다. 고객 계좌의 돈은 각 은행 DB에서만 움직인다
+- **손실분담이 없다.** `OVERDUE` 은행이 끝내 채우지 않을 때 다른 은행이 나눠 지는 규칙·담보 처분은 범위 밖이다. 허브는 그 은행의 송금을 막을 뿐이다
+- **허브 운영자를 믿는 구조다** (9.6과 같은 성격). 서명(2절·2.5)으로 "보낸 사실"과 "답한 사실"은 제3자에게 증명되지만, 허브가 거래를 빠뜨리거나 기록을 지우는 것은 막지 못한다. 은행은 서명된 원문을 보관해 대사 때 맞춰 본다
+- dispute가 판정되기 전에는 확정이 늦어진다 (10.7). 그동안 `DRAFT`의 거래는 미정산 순채무(10.2)에 남고, 매일 배치는 새 run을 만들지 않는다
+- 자동 확정은 ack하지 않은 은행이 있어도 09:00 KST에 된다. 늦게 맞춰 본 `SETTLED` run의 불일치는 허브 관리자에게 직접 알린다 (10.6)
+
+---
+
+## 부록 A. 합의 기록
+
+v1.0 확정 전에 참가 팀과 정한 것들이다. **6번만 미정**이고 나머지는 확정이다. 자세한 규칙과 이유는 괄호의 절에 있다.
+
+| # | 항목 | 결정 |
+|---|---|---|
+| 1 | 은행 코드 배정 | 셀프 등록 때 허브가 `903`부터 비어 있는 가장 작은 코드를 배정한다 (3.5). 관리자 직접 등록은 코드를 정해 넣는다. `901` AvengersBank, `902` 가짜 은행 SimBank |
+| 2 | 계좌번호 형식 | 은행별 자유. 허브는 1~50자 문자열인지만 본다 (1절) |
+| 3 | 허브 → 은행 호출의 `X-Api-Key` | 넣지 않는다. `X-Bank-Code: 000` + 허브 개인키 서명만 (2.1) |
+| 4 | `base_url` 아래 경로 | `/inquiry`, `/receive`, `/receive/{transfer_id}`, `/accounts`(9.4)로 고정 |
+| 5 | 1회 이체 상한 | 허브 1억 원. 받는 은행의 한도는 자율(`LIMIT_EXCEEDED`) |
+| 6 | 받는 은행이 거절할 수 있는 조건 | **미정.** 지금은 허브가 받는 은행의 4xx를 코드와 상관없이 거절(`FAILED`)로 처리한다 (4.2 규칙 4, 5절) |
+| 7 | 재시도 간격·횟수 | 1분 × 10회, 그 뒤 `UNKNOWN` (3.4) |
+| 8 | 정산 시각·방식 | 매일 00:05 KST에 DRAFT, 모의 예치금 원장, 대사는 선택. 포지션이 있는 은행이 모두 ack하면 즉시, 아니면 09:00 KST에 dispute가 없으면 자동 확정. dispute는 허브 관리자 판정 (10절, 10.7) |
+| 9 | 허브 주소, 시험 환경 | `https://clearing-hub.ai-agent-develop.cloud`. 별도 시험 환경 없이 가짜 은행 `902`로 시험한다 (7절 6). 로컬 연습은 devserver (빠른 시작) |
+| 10 | 사기 신고 계좌 공유 | 이 규격에서 다루지 않는다 |
+| 11 | 본인 계좌 조회(9절) 참여 | 은행 선택. 9.4가 없는 은행(404)은 결과에서 `UNSUPPORTED` |
+| 12 | 가상 CI 재료 | 이름 + 생년월일 + 휴대폰번호, 9.1의 정규화 규칙 |
+| 13 | `CI_KEY` 관리 | 허브 관리자가 하나 만들어 초대 코드와 같은 개별 경로로 준다 (7절 1). 9.1의 예시 키는 검증용 |
+| 14 | 다른 은행 계좌를 주는 방식 | 전체 계좌번호 대신 `account_ref` (허브 보관, 30분, 9.3) |
+| 15 | 본인 계좌 조회 횟수 | 요청 은행별 같은 CI 24시간 10회, 넘으면 `TOO_MANY_LOOKUPS` (9.2) |
+| 16 | 추적 ID | `X-Request-ID` 선택, 서명 대상 아님, 허브가 받는 은행까지 전달 (2.4) |
+| 17 | 서명 대상 | 시각·메서드·규격 경로·본문 (2.2). 응답에도 서명하고 `request_signature`로 요청에 묶는다 (2.5) |
+| 18 | 예치금·순채무한도 | 예치금 기본 0, 순채무한도 기본 10억. 허브 관리자가 은행별로 바꾼다 (10.2) |
+| 19 | 서명 방식 | Ed25519 하나. HMAC·서명 모드는 없다 (2절) |
+| 20 | 등록 | 관리자는 초대 코드(7일, 한 번)와 허브 공개키 지문만 보내고, 은행이 셀프 등록한다 (3.5, 7절) |
+| 21 | 관리자 손 줄이기 | 정산 자동 확정(10.7), 받는 쪽 셀프 시험(3.7). 허브 관리자는 알림에 대응한다 |
+| 22 | 연동 진단 | 허브가 인증 실패를 기록하고 규칙으로 원인을 찾는다. 401 본문 `hint`, `GET /v1/diagnose/failures` (3.8) |
 
 ---
 
@@ -1501,3 +1853,4 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 | 1.0 (초안) | 2026-11-06 | **서명은 Ed25519 하나 (HMAC 삭제), 셀프 등록, 기본 한도.** 같은 날 먼저 쓴 1.0 초안(HMAC과 Ed25519를 은행별 서명 모드 `hmac`·`both`·`ed25519`로 함께 쓰는 판)을 다른 팀이 연동을 시작하기 전에 고쳐 썼다. HMAC secret·서명 모드·전환 순서·`HUB_KEY_MISSING`을 뺐다 (허브가 은행의 비밀을 갖지 않는다). 1절 인증 줄. 2절 전체를 Ed25519 전용으로: 2.1 `X-Signature-Alg: ed25519`(생략 가능), 2.2 메시지(v0.5와 같다), 2.3 예시용 키 쌍과 예시 1·2, 참고 구현, 2.5 응답 서명 **필수**(예시 3, 검증 실패는 "응답 없음"), 2.6 키 만들기 → 지문 → 등록 → 허브 공개키 → 회전(옛 키 24시간). 3절 머리에 API 표, 새 3.5 셀프 등록 `POST /v1/banks/register`(초대 코드, 코드 자동 배정, ping 결과), 새 3.6 `GET`·`PATCH /v1/me`, `POST /v1/me/ping`(ping 결과 표). 4절 머리말. 5절 `PUBLIC_KEY_MISSING`·`INVITE_INVALID`·`BANK_EXISTS`·`BANK_CODE_EXHAUSTED`·`PING_FAILED`. 7절을 셀프 등록 기준으로 다시 씀. 8절 1·3·13·17·18·19 갱신, 20 추가. 10.2 순채무한도 기본 10억(등록 직후부터 송금 가능). 10.7. 체크리스트. 루트 `/` 응답 `v1.0` |
 | 1.1 (초안) | 2026-11-06 | **관리자 손 줄이기** (1.0과 호환: 은행 → 허브 API만 더했다. 4절은 그대로). 새 3.7 셀프 시험 `POST /v1/test-receive`(허브가 가짜 은행 `902` 명의로 내 은행에 시험 이체, 응답에 `receiver_reply`), `/resend`(같은 `transfer_id` 재전송으로 멱등 시험), `/status`(4.3 확인). 새 10.8 `POST /v1/settlements/{run_id}/ack`·`/dispute`: 포지션이 있는 은행이 모두 ack하면 즉시 확정, 아니면 09:00 KST에 dispute가 없으면 자동 확정, dispute면 허브 관리자 판정(알림 자동). 10.4·10.5에 `my_ack`. 10.1·10.3·10.6·10.7을 자동 확정 기준으로 고침. 7절 7을 셀프 시험으로 다시 씀(관리자 요청 삭제). 5절 `SETTLEMENT_NOT_DRAFT`·`TOO_MANY_TESTS`·`SIM_BANK_UNAVAILABLE`·`TRANSFER_NOT_COMPLETED`. 8절 8·20 갱신, 21 추가. 체크리스트. 루트 `/` 응답 `v1.1` |
 | 1.2 (초안) | 2026-11-06 | **연동 진단** (1.1과 호환: 은행 → 허브 API 하나와 오류 본문의 선택 필드만 더했다. 서명·4절은 그대로). 새 3.8 `GET /v1/diagnose/failures`: 서명 없이 `X-Bank-Code`·`X-Api-Key`로 식별, 읽기 전용, 내 실패만. 허브가 인증 실패(내 요청의 401, 내 서버의 401·403·응답 서명 오류)를 기록하고, 실패한 서명을 흔한 실수 변형으로 다시 계산해 원인 가설(`verified`, `spec_ref`, `fix`)을 준다. 5절: 식별된 은행의 401 본문에 선택 필드 `hint`(1순위 가설 한 줄). 3절 API 표, 7절 8(401이 나면: `hint` → `/v1/diagnose/failures` → 관리자), 8절 22, 체크리스트. 루트 `/` 응답 `v1.2` |
+| 1.2.1 (초안) | 2026-11-06 | **문서만** (허브·은행 동작은 1.2와 같다. 루트 `/`의 `spec`도 `v1.2` 그대로). 맨 앞에 **빠른 시작**(키 → 서명 함수 → 받는 쪽 최소 구현 → 셀프 등록 → 902로 보내기 → 셀프 시험 → 401일 때, 코드는 허브 테스트가 실행해 확인). 모든 절 제목에 [필수]·[선택]·[알아야 함]. 8절 "합의가 필요한 것"을 **부록 A 합의 기록**으로 옮겨 결정만 남김(본문의 "8절 n" → "부록 A n", 6번만 미정). 10.7·10.8의 순서를 바로잡음: 대사 결과 보내기(ack·dispute)가 **10.7**, 한계가 **10.8** (1.1·1.2 판의 "10.8"은 지금의 10.7). 2.3·2.5 참고 구현에 시각 인자(`ts`), 다른 언어의 raw 키 → DER 안내. 7절 9 참고 구현 목록(`examples/README.md`). 로컬 개발 서버(`python -m clearing_hub.devserver`) 안내 |

@@ -100,7 +100,7 @@ class BankSettlementOut(BaseModel):
     settled_at: UtcDatetime | None = Field(description="확정 시각. DRAFT면 null")
     net_amount: int = Field(description="내 포지션: 받을 돈 − 줄 돈. 그 run에 내 거래가 없으면 0")
     result: str | None = Field(description="내 예치금 반영 결과 OK / OVERDRAWN / OVERDUE. 확정 전이거나 내 거래가 없으면 null")
-    my_ack: Literal["ACK", "DISPUTE"] | None = Field(description="내가 보낸 대사 결과 (SPEC 10.8). 안 보냈으면 null")
+    my_ack: Literal["ACK", "DISPUTE"] | None = Field(description="내가 보낸 대사 결과 (SPEC 10.7). 안 보냈으면 null")
 
 
 class BankSettlementList(BaseModel):
@@ -139,11 +139,11 @@ class BankSettlementDetail(BaseModel):
     settled_at: UtcDatetime | None
     position: BankPositionOut
     transfers: list[ReconTransferOut] = Field(description="그 run에서 내가 보내거나 받은 거래, 끝난 시각 순")
-    my_ack: Literal["ACK", "DISPUTE"] | None = Field(description="내가 보낸 대사 결과 (SPEC 10.8). 안 보냈으면 null")
+    my_ack: Literal["ACK", "DISPUTE"] | None = Field(description="내가 보낸 대사 결과 (SPEC 10.7). 안 보냈으면 null")
 
 
 class DisputeIn(BaseModel):
-    """POST /v1/settlements/{run_id}/dispute 본문 (SPEC 10.8)."""
+    """POST /v1/settlements/{run_id}/dispute 본문 (SPEC 10.7)."""
 
     transfer_ids: list[Annotated[str, Field(min_length=1, max_length=36)]] = Field(
         max_length=1000, description="차이 나는 transfer_id (허브에만 있는 것, 금액·방향이 다른 것). 비어도 된다")

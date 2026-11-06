@@ -237,7 +237,7 @@ def invite_message(code: str, expires_at: datetime, hub_url: str) -> str:
         f"- 초대 코드: {code}",
         f"- 만료: {local} (KST, {expires.strftime('%Y-%m-%dT%H:%M:%SZ')})",
         f"- 허브 주소: {hub_url}",
-        "- 연동 규격: ClearingHub 저장소의 docs/SPEC.md (7절 연동 절차부터)",
+        "- 연동 규격: ClearingHub 저장소의 docs/SPEC.md (맨 앞 '빠른 시작'부터)",
         f"- 허브 공개키: {hub_public}",
         f"- 허브 공개키 지문: {fingerprint(hub_public)} (등록 응답의 hub_fingerprint가 이 값과 같은지 꼭 확인하세요)",
         f"- 등록 방법: 키 쌍을 만들고 받는 쪽 API를 띄운 뒤 POST {hub_url}/v1/banks/register 에 "

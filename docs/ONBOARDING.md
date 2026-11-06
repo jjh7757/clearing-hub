@@ -1,6 +1,6 @@
 # 참가 은행 받기 (허브 관리자용)
 
-관리자가 하는 일은 셋뿐이다. 등록·키·주소 변경·연결 확인·받는 쪽 시험·정산 확정은 은행과 허브가 스스로 한다 ([SPEC.md](SPEC.md) 7절, 3.7, 10.8).
+관리자가 하는 일은 셋뿐이다. 등록·키·주소 변경·연결 확인·받는 쪽 시험·정산 확정은 은행과 허브가 스스로 한다 ([SPEC.md](SPEC.md) 7절, 3.7, 10.7).
 
 1. **초대 코드 발급·지문 전달** — 새 팀이 오면 (1)
 2. **알림 대응** — dispute, `OVERDUE`, `UNKNOWN`, ping 실패 등이 관리자 채널(`ALERT_WEBHOOK_URL`)에 오면 (5)
@@ -38,7 +38,7 @@ ClearingHub 참가 초대입니다.
 - 초대 코드: inv_…
 - 만료: 2026-11-13 12:00 (KST, 2026-11-13T03:00:00Z)
 - 허브 주소: https://clearing-hub.ai-agent-develop.cloud
-- 연동 규격: ClearingHub 저장소의 docs/SPEC.md (7절 연동 절차부터)
+- 연동 규격: ClearingHub 저장소의 docs/SPEC.md (맨 앞 '빠른 시작'부터)
 - 허브 공개키: …
 - 허브 공개키 지문: … (등록 응답의 hub_fingerprint가 이 값과 같은지 꼭 확인하세요)
 - 등록 방법: 키 쌍을 만들고 받는 쪽 API를 띄운 뒤 POST https://clearing-hub.ai-agent-develop.cloud/v1/banks/register 에 invite_code·name·base_url·public_key를 보냅니다 (SPEC 3.5)
@@ -98,7 +98,7 @@ curl -s -X PATCH $HUB/admin/banks/903 -H "X-Admin-Token: $TOKEN" -H "Content-Typ
 
 알림은 `ALERT_WEBHOOK_URL`(Slack·Discord)로 온다. 글 맨 앞 `[ClearingHub·종류]`가 아래 표의 종류이고, 둘째 줄에 `run_id`·`bank_code`·`transfer_id`가 붙는다. 웹훅을 넣지 않았으면 같은 내용이 서버 로그(`logger.error`·`warning`)에만 남는다.
 
-정산 확정은 관리자 일이 아니다: 포지션이 있는 은행이 모두 ack하면 즉시(`settled_by: auto-ack`), 아니면 매일 09:00 KST에 dispute가 없으면(`auto-deadline`) 확정되고 알림 `auto_confirm`이 온다 (SPEC 10.8). 관리자는 **dispute가 왔을 때만** 판정한다.
+정산 확정은 관리자 일이 아니다: 포지션이 있는 은행이 모두 ack하면 즉시(`settled_by: auto-ack`), 아니면 매일 09:00 KST에 dispute가 없으면(`auto-deadline`) 확정되고 알림 `auto_confirm`이 온다 (SPEC 10.7). 관리자는 **dispute가 왔을 때만** 판정한다.
 
 | 알림 (종류) | 보는 곳 | 할 일 |
 |---|---|---|

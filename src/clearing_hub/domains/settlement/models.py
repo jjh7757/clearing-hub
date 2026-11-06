@@ -100,7 +100,7 @@ class AckResult(StrEnum):
 
 
 class SettlementAck(Base):
-    """은행의 대사 결과 (SETTLEMENT_PLAN 13절, SPEC 10.8). run마다 은행당 한 행. 다시 보내면 덮어쓴다
+    """은행의 대사 결과 (SETTLEMENT_PLAN 13절, SPEC 10.7). run마다 은행당 한 행. 다시 보내면 덮어쓴다
     (ACK → DISPUTE, DISPUTE → ACK 모두). DRAFT일 때만 받는다. run이 취소·확정돼도 기록으로 남긴다.
 
     포지션이 있는 모든 은행이 ACK이고 DISPUTE가 하나도 없으면 그 자리에서 확정한다 (auto_confirm.record).

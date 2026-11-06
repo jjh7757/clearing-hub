@@ -16,7 +16,7 @@ from clearing_hub.domains.settlement.schemas import (
     SettlementTransferOut,
 )
 
-# 은행용 대사 API (SETTLEMENT_PLAN 6.1·13절, SPEC 10.4·10.5·10.8). 쿼리스트링 없이 부른다 (SPEC 2.2). 요청한 은행의 몫만 준다
+# 은행용 대사 API (SETTLEMENT_PLAN 6.1·13절, SPEC 10.4·10.5·10.7). 쿼리스트링 없이 부른다 (SPEC 2.2). 요청한 은행의 몫만 준다
 router = APIRouter(prefix="/v1/settlements", tags=["settlements"])
 # 관리자용 정산 API (SETTLEMENT_PLAN 6.2)
 admin_router = APIRouter(prefix="/admin/settlements", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -77,7 +77,7 @@ async def _record(db: AsyncSession, run_id: int, bank: Bank, result: AckResult, 
 
 @router.post("/{run_id}/ack", response_model=AckOut)
 async def ack_settlement(run_id: int, db: DB, bank: Me):
-    """대사 일치 (SPEC 10.8). 본문 없음(또는 `{}`). DRAFT에만 보낸다 (SETTLED·CANCELLED는 409 SETTLEMENT_NOT_DRAFT).
+    """대사 일치 (SPEC 10.7). 본문 없음(또는 `{}`). DRAFT에만 보낸다 (SETTLED·CANCELLED는 409 SETTLEMENT_NOT_DRAFT).
     포지션이 있는 모든 은행이 ack하고 dispute가 없으면 이 요청 안에서 확정돼 응답의 `status`가 `SETTLED`다.
     그 run에 내 거래가 없어도 받는다 (기록만, 확정 조건에는 세지 않는다). 다시 보내면 덮어쓴다."""
     return await _record(db, run_id, bank, AckResult.ACK)
@@ -85,7 +85,7 @@ async def ack_settlement(run_id: int, db: DB, bank: Me):
 
 @router.post("/{run_id}/dispute", response_model=AckOut)
 async def dispute_settlement(run_id: int, data: DisputeIn, db: DB, bank: Me):
-    """대사 불일치 (SPEC 10.8) `{transfer_ids, message?}`. 그 run은 자동 확정되지 않고 허브 관리자에게 알림이 간다.
+    """대사 불일치 (SPEC 10.7) `{transfer_ids, message?}`. 그 run은 자동 확정되지 않고 허브 관리자에게 알림이 간다.
     관리자가 확정하거나 취소한다. 나중에 맞으면 ack를 다시 보내 풀 수 있다. DRAFT에만 (409 SETTLEMENT_NOT_DRAFT)."""
     return await _record(db, run_id, bank, AckResult.DISPUTE, data)
 

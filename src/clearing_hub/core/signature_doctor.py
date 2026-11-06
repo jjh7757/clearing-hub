@@ -147,7 +147,7 @@ CATALOG: dict[str, tuple[str, str, str]] = {
     "BANK_CLOCK": ("은행 서버 시계가 틀어짐 (허브 서명을 만료로 거절)", "2.2", "은행 서버를 NTP로 맞춘다"),
     "BANK_HEADER_CHECK": ("은행이 허브 요청에 다른 헤더를 기대함", "2.1",
                           "허브는 `X-Bank-Code: 000`·`X-Timestamp`·`X-Signature`·`X-Signature-Alg: ed25519`만 보내고 "
-                          "`X-Api-Key`는 보내지 않는다 (8절 3). API 키를 요구하지 않는다"),
+                          "`X-Api-Key`는 보내지 않는다 (SPEC 부록 A 3). API 키를 요구하지 않는다"),
     "BANK_FORBIDDEN": ("은행이 허브 요청을 403으로 막음", "4", "방화벽·WAF·IP 제한·`X-Bank-Code` 검사를 확인한다"),
     # 은행 응답 서명
     "RESPONSE_SIGNATURE_MISSING": ("은행 응답에 `X-Response-Signature`가 없음", "2.5",

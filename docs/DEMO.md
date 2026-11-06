@@ -167,7 +167,7 @@ AvengersBank 쪽: 30초 안에 서버 로그에 `허브 정산 대사: run <RUN>
 curl -s -X POST $HUB/admin/settlements/$RUN/confirm -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"reason":"시연: 대사 완료"}'
 ```
 
-`200`, `status: SETTLED`, `settled_by: admin`. (운영에서는 이 명령이 필요 없다: 포지션이 있는 은행이 모두 대사 결과를 ack하면 그 요청 안에서 확정되고(`settled_by: auto-ack`), 아니면 09:00 KST에 dispute가 없으면 확정된다(`auto-deadline`, SPEC 10.8). 시연에서는 대사를 하지 않는 가짜 은행 902가 있어 관리자가 바로 확정한다.) `/admin/reserve`:
+`200`, `status: SETTLED`, `settled_by: admin`. (운영에서는 이 명령이 필요 없다: 포지션이 있는 은행이 모두 대사 결과를 ack하면 그 요청 안에서 확정되고(`settled_by: auto-ack`), 아니면 09:00 KST에 dispute가 없으면 확정된다(`auto-deadline`, SPEC 10.7). 시연에서는 대사를 하지 않는 가짜 은행 902가 있어 관리자가 바로 확정한다.) `/admin/reserve`:
 
 | 은행 | `balance` | `exposure` | `available` | 분개 (`/admin/reserve/{code}/ledger`) |
 |---|---|---|---|---|

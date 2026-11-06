@@ -31,7 +31,9 @@ async def current_bank(
     if not bank.active:
         raise Unauthorized(code="BANK_INACTIVE", message="비활성 은행입니다")
     body = await request.body()
-    error = verify(bank.hmac_secret, x_timestamp, body, x_signature, get_settings().signature_max_skew_seconds)
+    # 허브 API의 규격 경로는 `/v1/...` 그대로다 (SPEC 2.2)
+    error = verify(bank.hmac_secret, x_timestamp, request.method, request.url.path, body, x_signature,
+                   get_settings().signature_max_skew_seconds)
     if error:
         raise Unauthorized(code=error, message="서명이 맞지 않습니다" if error == "SIGNATURE_INVALID" else "서명 시각이 만료됐습니다")
     return bank

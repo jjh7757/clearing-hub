@@ -34,16 +34,16 @@ class SignedBank:
     def __init__(self, client: AsyncClient, bank_code: str, api_key: str, secret: str):
         self.client, self.bank_code, self.api_key, self.secret = client, bank_code, api_key, secret
 
-    def headers(self, body: bytes, timestamp: int | None = None) -> dict[str, str]:
+    def headers(self, method: str, path: str, body: bytes, timestamp: int | None = None) -> dict[str, str]:
         return {"X-Bank-Code": self.bank_code, "X-Api-Key": self.api_key, "Content-Type": "application/json",
-                **sign(self.secret, body, timestamp)}
+                **sign(self.secret, method, path, body, timestamp)}
 
     async def post(self, path: str, payload: dict, **kw):
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-        return await self.client.post(path, content=body, headers=self.headers(body, **kw))
+        return await self.client.post(path, content=body, headers=self.headers("POST", path, body, **kw))
 
     async def get(self, path: str):
-        return await self.client.get(path, headers=self.headers(b""))
+        return await self.client.get(path, headers=self.headers("GET", path, b""))
 
 
 @pytest.fixture

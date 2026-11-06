@@ -105,7 +105,7 @@ C은행 ────────┘   ├ banks      참가 은행 등록·키 �
 | 장치 | 내용 |
 |---|---|
 | 은행별 API 키 | 허브가 발급. 요청 헤더 `X-Bank-Code`, `X-Api-Key`. 해시로 저장 |
-| 요청 서명 | 헤더 `X-Timestamp`, `X-Signature = HMAC-SHA256(secret, timestamp + "\n" + body)`. 시각 차이 5분 초과면 거절 (재전송 공격 방지). 허브 → 은행 호출도 같은 방식으로 서명 |
+| 요청 서명 | 헤더 `X-Timestamp`, `X-Signature = HMAC-SHA256(secret, timestamp + "\n" + METHOD + "\n" + PATH + "\n" + body)` (PATH는 SPEC 2.2의 규격 경로). 시각 차이 5분 초과면 거절 (재전송 공격 방지). 허브 → 은행 호출도 같은 방식으로 서명 |
 | 멱등성 | 같은 `transfer_id`가 다시 오면 처리하지 않고 저장된 결과를 돌려준다. 은행도 `/interbank/receive`에서 같은 규칙 |
 | 사칭 방지 | `from_bank`는 요청 본문이 아니라 인증된 `X-Bank-Code`로 정한다 |
 | 관리자 | JWT 로그인. 관리 API는 `/admin/*`로 분리 |

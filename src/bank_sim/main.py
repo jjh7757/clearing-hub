@@ -70,7 +70,9 @@ async def verify_hub(
         return
     if x_bank_code != "000" or not (x_timestamp and x_signature):
         raise SignatureError("UNAUTHORIZED")
-    error = verify(secret, x_timestamp, await request.body(), x_signature)
+    # 서명 경로는 base_url(`.../interbank`) 뒤의 부분이다 (SPEC 2.2). 프록시가 앞에 무엇을 붙여도 같다
+    spec_path = request.url.path.partition("/interbank")[2]
+    error = verify(secret, x_timestamp, request.method, spec_path, await request.body(), x_signature)
     if error:
         raise SignatureError(error)
 

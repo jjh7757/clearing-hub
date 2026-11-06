@@ -17,7 +17,7 @@ pytestmark = pytest.mark.anyio
 
 async def post_with_id(bank, path: str, payload: dict, request_id: str | None):
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-    headers = bank.headers(body)
+    headers = bank.headers("POST", path, body)
     if request_id is not None:
         headers["X-Request-ID"] = request_id
     return await bank.client.post(path, content=body, headers=headers)

@@ -81,7 +81,9 @@ class BankClient:
     ) -> BankReply:
         url = bank.base_url.rstrip("/") + path
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode() if payload is not None else b""
-        headers = {"X-Bank-Code": HUB_BANK_CODE, "Content-Type": "application/json; charset=utf-8", **sign(bank.hmac_secret, body)}
+        # 서명 경로는 base_url 뒤의 부분이다 (SPEC 2.2). 은행 앞단 프록시가 경로를 바꿔도 맞게 하기 위해서다
+        headers = {"X-Bank-Code": HUB_BANK_CODE, "Content-Type": "application/json; charset=utf-8",
+                   **sign(bank.hmac_secret, method, path, body)}
         # 추적 ID (SPEC 2.4): 거래에 저장된 값 > 지금 요청의 값. 재시도 태스크처럼 요청 밖이면 저장된 값만 쓴다
         request_id = request_id or get_request_id()
         if request_id:

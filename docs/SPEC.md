@@ -1,4 +1,4 @@
-# ClearingHub 참가 은행 연동 규격 v0.4.7 (초안)
+# ClearingHub 참가 은행 연동 규격 v0.5 (초안)
 
 - 작성일: 2026-11-05 (최종 수정 2026-11-06)
 - 대상: ClearingHub(은행 간 이체 중계 서버)에 참가하려는 은행 서버 개발팀
@@ -19,6 +19,7 @@
 **받는 쪽 (허브가 부르는 API)**
 - [ ] `{base_url}/inquiry`, `/receive`, `/receive/{transfer_id}` 3개를 만들었다. 9절에 참여하면 `/accounts`도 만들었다 (4절, 9.4)
 - [ ] 서명은 JSON으로 풀기 **전의 원본 바이트**로 검증하고, `X-Bank-Code`가 `"000"`인지 본다. 검증을 입금 처리보다 먼저 한다 (2.2, 4.2)
+- [ ] 서명 경로는 서버가 받은 전체 경로가 아니라 **`base_url` 뒤의 부분**(`/receive` 등)으로 검증한다. 프록시가 앞부분을 바꿔도 같다 (2.2)
 - [ ] `/inquiry`의 200 응답에 `holder_name`이 항상 들어 있다 (4.1)
 - [ ] `/receive`는 `transfer_id`에 유니크 제약을 걸고, 입금과 ID 저장을 한 트랜잭션으로 한다. 같은 ID가 다시 오면 입금하지 않고 200을 준다 (4.2)
 - [ ] 같은 ID가 동시에 와서 유니크 제약에 걸린 쪽은 4xx(`409` 포함)로 답하지 않고 200 또는 5xx로 답한다 (4.2 규칙 2. 4xx면 이중 지급)
@@ -27,6 +28,7 @@
 **보내는 쪽 (허브를 부르는 코드)**
 - [ ] 출금(중간 계정으로 옮기기)을 끝낸 **뒤에** `POST /v1/transfers`를 부른다 (3.3, 6절)
 - [ ] 출금을 되돌릴지는 **본문의 `status`가 `"FAILED"`인지로만** 정한다. 202, `status` 없는 4xx, 5xx, 타임아웃이면 되돌리지 않는다 (3.3)
+- [ ] 서명에 메서드와 `/v1`부터의 경로를 넣는다. 2.3의 예시 두 개와 값이 같은지 확인했다 (2.2, 2.3)
 - [ ] 재전송할 때는 같은 `transfer_id`를 쓰고 서명은 새로 만든다. 새 이체에는 새 `transfer_id`를 쓴다 (2.2, 3.3)
 - [ ] 결과를 모르는 거래는 `GET /v1/transfers/{id}`로 확인하고, 서버가 재시작되면 `PENDING` 거래를 다시 확인한다 (3.4, 6절)
 - [ ] 결과 조회가 `404 TRANSFER_NOT_FOUND`면 바로 되돌리지 않고 같은 `transfer_id`로 POST를 다시 보낸다 (3.4)
@@ -86,10 +88,20 @@
 ### 2.2 서명 만들기
 
 ```
-message   = X-Timestamp + "\n" + body
+message   = X-Timestamp + "\n" + METHOD + "\n" + PATH + "\n" + body
 signature = hex( HMAC-SHA256( key = secret, message = UTF-8 bytes of message ) )
 ```
 
+- `METHOD`는 HTTP 메서드 대문자다 (`GET`, `POST`).
+- `PATH`는 **이 문서에 적힌 경로**다. 서버가 실제로 받은 경로가 아니다.
+
+  | 방향 | `PATH` | 예 |
+  |---|---|---|
+  | 은행 → 허브 (3절·9.2) | `/v1`부터의 경로 | `/v1/transfers`, `/v1/transfers/7c9e6679-…` |
+  | 허브 → 은행 (4절·9.4) | `base_url` **뒤의 부분** | `/inquiry`, `/receive`, `/receive/7c9e6679-…`, `/accounts` |
+
+  `base_url`이 `https://b-bank.example.com/interbank`이면 허브가 부르는 주소는 `…/interbank/receive`지만 서명의 `PATH`는 `/receive`다. 은행 앞단의 프록시가 `/interbank`를 떼거나 `/api`를 붙여도 서명은 그대로 맞는다. 검증하는 쪽은 받은 경로에서 자기 `base_url` 경로 부분을 떼고 비교한다.
+- 쿼리스트링은 쓰지 않는다. 이 문서의 API는 모두 쿼리 없이 부른다. 끝의 `/`도 붙이지 않는다.
 - `body`는 **실제로 전송하는 바이트 그대로**다. 서명한 뒤에 JSON을 다시 직렬화하면 안 된다 (키 순서·공백이 바뀌면 서명이 틀린다). 본문이 없는 GET은 `body = ""`.
 - 받는 쪽은 `X-Timestamp`가 현재 시각과 **5분(300초)** 넘게 차이 나면 `SIGNATURE_EXPIRED`로 거절한다 (재전송 공격 방지). 서버 시계는 NTP로 맞춰 둔다. 시계가 틀어지면 모든 요청이 `SIGNATURE_EXPIRED`로 거절된다.
 - 재전송할 때는 `X-Timestamp`와 `X-Signature`를 **새로 만든다**. 본문은 처음과 같아도 된다.
@@ -97,40 +109,59 @@ signature = hex( HMAC-SHA256( key = secret, message = UTF-8 bytes of message ) )
 
 ### 2.3 예시 (검증용)
 
+예시 1: 은행 → 허브 이체 요청
+
 ```
 secret      = example-secret-change-me
 X-Timestamp = 1762300800
+METHOD      = POST
+PATH        = /v1/transfers
 body (190 bytes, 공백 없음) =
 {"transfer_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7","to_bank":"902","to_account":"110-123-0001","from_account":"110-200-456789","amount":50000,"sender_name":"홍길동","memo":"생활비"}
 
-X-Signature = a05b6c21278364c75bd36df9cbedbbca72e241466da38d7aa2ee3a1d0725a8c7
+X-Signature = 1afb099015e80126587211e3a2ef82bfbb9c0a4af2d9065519029985e7797f65
 ```
+
+예시 2: 허브 → 은행 입금 확인 (본문 없는 GET)
+
+```
+secret      = example-secret-change-me
+X-Timestamp = 1762300800
+METHOD      = GET
+PATH        = /receive/7c9e6679-7425-40de-944b-e07fc1f90ae7
+body        = (빈 문자열)
+
+X-Signature = d1c18e703107fcf4132c301e468014f1487099ec302b0571806694972ea5bc89
+```
+
+예시 2의 `message`는 `"1762300800\nGET\n/receive/7c9e6679-7425-40de-944b-e07fc1f90ae7\n"`이다. 본문이 비어도 경로 뒤의 `\n`은 넣는다.
 
 Python 참고 구현:
 
 ```python
 import hmac, hashlib, time
 
-def sign(secret: str, body: bytes) -> dict[str, str]:
-    ts = str(int(time.time()))
-    msg = ts.encode() + b"\n" + body
-    sig = hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
-    return {"X-Timestamp": ts, "X-Signature": sig}
+def _digest(secret: str, ts: str, method: str, path: str, body: bytes) -> str:
+    msg = f"{ts}\n{method.upper()}\n{path}\n".encode() + body
+    return hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
 
-def verify(secret: str, ts: str, body: bytes, signature: str, skew: int = 300) -> bool:
+def sign(secret: str, method: str, path: str, body: bytes) -> dict[str, str]:
+    ts = str(int(time.time()))
+    return {"X-Timestamp": ts, "X-Signature": _digest(secret, ts, method, path, body)}
+
+def verify(secret: str, ts: str, method: str, path: str, body: bytes, signature: str, skew: int = 300) -> bool:
     # 헤더 값이 숫자가 아니거나 ASCII가 아니면 예외(500) 대신 False(401)로 끝낸다
     try:
         if abs(int(time.time()) - int(ts)) > skew:
             return False
-        expected = hmac.new(secret.encode(), ts.encode() + b"\n" + body, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected.encode(), signature.encode("ascii"))
+        return hmac.compare_digest(_digest(secret, ts, method, path, body).encode(), signature.encode("ascii"))
     except (ValueError, TypeError, UnicodeEncodeError):
         return False
 ```
 
 위 `verify`는 맞음·틀림만 돌려준다. 오류 코드를 나눠야 하면(5절) 헤더 없음은 `UNAUTHORIZED`, 시각 차이 초과는 `SIGNATURE_EXPIRED`, 그 밖의 실패는 `SIGNATURE_INVALID`로 답한다. 어느 경우든 401이다.
 
-FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검증한 뒤 JSON으로 푼다.
+FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검증한 뒤 JSON으로 푼다. 은행이 4절 API를 검증할 때 `PATH`는 받은 경로에서 `base_url` 경로 부분 뒤만 쓴다. 예를 들어 라우터 접두사가 `/interbank`이면 `request.url.path.partition("/interbank")[2]`다.
 
 ### 2.4 추적 ID `X-Request-ID` (선택)
 
@@ -461,7 +492,7 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
    | ping 결과 `status` | 뜻 |
    |---|---|
    | `404` (`ACCOUNT_NOT_FOUND`) 또는 `200` | 정상: 연결·서명 검증 모두 됨 |
-   | `401`·`403` | 연결은 됐지만 서명 검증 실패. 은행이 가진 secret이 허브와 같은지, 검증에 원본 본문 바이트를 쓰는지 확인 (2절) |
+   | `401`·`403` | 연결은 됐지만 서명 검증 실패. 은행이 가진 secret이 허브와 같은지, 검증에 원본 본문 바이트를 쓰는지, `PATH`를 `base_url` 뒤의 부분(`/inquiry`)으로 쓰는지 확인 (2.2) |
    | `404` (`error`가 `ACCOUNT_NOT_FOUND`가 아님) | `base_url` 경로가 틀림 |
    | `5xx` | 은행 서버 오류 |
    | `null` (`reachable: false`) | 연결 안 됨: 주소·방화벽·인증서·5초 타임아웃 확인 |
@@ -501,6 +532,7 @@ FastAPI에서 본문 바이트는 `await request.body()`로 받아 그대로 검
 | 14 | 다른 은행 계좌를 보내는 은행에 주는 방식 | `account_ref`(허브 보관, 30분) / 전체 계좌번호 그대로 (9.3) | 확정 (v0.4): `account_ref`, 30분(`ACCOUNT_REF_TTL_SECONDS`) |
 | 15 | 본인 계좌 조회 횟수 제한 | 은행별 같은 CI 하루 10회 | 확정 (v0.4): 요청 은행별 같은 CI 24시간 10회(`LOOKUP_DAILY_LIMIT`), 넘으면 `TOO_MANY_LOOKUPS` |
 | 16 | 추적 ID `X-Request-ID` (2.4) | 선택, 서명 제외, 허브가 받는 은행까지 전달 | 확정 (v0.4): 허브·AvengersBank·가짜 은행 구현 |
+| 17 | 서명 대상 | 본문만 / 메서드·경로 포함 | 확정 (v0.5): 메서드와 규격 경로를 포함 (2.2). 허브 → 은행은 `base_url` 뒤의 경로. 예전 형식을 받아 주는 기간은 없다 |
 
 ---
 
@@ -694,3 +726,4 @@ def virtual_ci(ci_key: str, name: str, birth: str, phone: str) -> str:
 | 0.4.5 | 2026-11-05 | 2차 검토 반영 (허브 동작 변경 없음). 맨 앞에 구현 체크리스트. 3.1: 예시의 `902` 이름을 `SimBank`로 바로잡음, 목록에 자기 은행도 들어 있다는 점. 3.4: `403 FORBIDDEN`. 4.1: `holder_name` 필수(없으면 허브가 502 `RECEIVER_ERROR`). 9.2: `ERROR`의 범위, `account_masked` 규칙. 9.4: 응답 필드 표, 형식이 틀린 항목은 버림, 401·403은 `ERROR` |
 | 0.4.6 | 2026-11-06 | 3차 검토 반영 (허브 동작 변경 없음). 4.2 규칙 2: 동시 중복 요청에서 유니크 제약에 걸린 쪽은 4xx로 답하면 안 된다(이중 지급)고 강제, 체크리스트 추가. 7절 5: `902`로는 보내는 쪽만 시험된다는 점과 `901`에서 이체를 받아 하는 받는 쪽 시험 절차, 멱등성은 은행이 직접 서명해 시험 |
 | 0.4.7 | 2026-11-06 | 4차 검토 반영 (허브 동작 변경 없음). 3.4·6절: 결과 조회의 `404 TRANSFER_NOT_FOUND`만 보고 바로 되돌리지 않고 같은 `transfer_id`로 POST 재전송(타임아웃 난 POST를 허브가 아직 처리 중이면 이중 지급). 꼭 되돌릴 때는 마지막 POST 뒤 1분이 지난 404만, 그 ID는 다시 보내지 않음. 체크리스트·"하지 말아야 할 것" 추가. 2.3: `verify`가 잘못된 헤더 값에 예외 대신 `False`, 401 코드 나누는 법. 4.2: `to_account`는 항상 들어오고 `to_account_ref`는 오지 않음, 허브 재시도는 4.3 확인 뒤 404일 때만 4.2 재전송 |
+| 0.5 | 2026-11-06 | **서명 형식 변경 (이전 버전과 호환되지 않음).** 2.2: `message`에 `METHOD`(대문자)와 `PATH`를 넣는다. 그전에는 본문이 없는 GET의 서명이 같은 초 안에서 모두 같아 다른 경로에 다시 쓸 수 있었다. `PATH`는 은행 → 허브는 `/v1`부터, 허브 → 은행은 `base_url` 뒤의 부분이다 (은행 앞단 프록시가 경로를 바꿔도 맞게). 쿼리스트링은 쓰지 않는다. 2.3 예시 값을 새로 계산하고 GET 예시 추가, 참고 구현 갱신. 7절 4 ping 401 안내, 8절 17, 체크리스트 추가. 허브·가짜 은행·AvengersBank 동시 변경 |

@@ -46,7 +46,7 @@ async def test_unexpected_error_has_request_id(banks, monkeypatch):
 
     monkeypatch.setattr(bank_service, "list_banks", broken)
     body = b""
-    headers = {**sender.headers(body), "X-Request-ID": "probe-500-0001"}
+    headers = {**sender.headers("GET", "/v1/banks", body), "X-Request-ID": "probe-500-0001"}
     res = await sender.client.get("/v1/banks", headers=headers)
     assert res.status_code == 500
     assert res.json() == {"error": "INTERNAL_ERROR", "message": "서버에서 오류가 발생했습니다"}

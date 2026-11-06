@@ -25,17 +25,19 @@ class BankUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=50)
     base_url: HttpUrl | None = Field(default=None, description="은행의 /interbank 주소")
+    net_debit_cap: int | None = Field(default=None, ge=0, description="순채무한도(원) (SETTLEMENT_PLAN 2절 6번)")
 
     @model_validator(mode="after")
     def something_to_change(self) -> "BankUpdate":
-        if self.name is None and self.base_url is None:
-            raise ValueError("name과 base_url 중 하나 이상을 넣어야 합니다")
+        if self.name is None and self.base_url is None and self.net_debit_cap is None:
+            raise ValueError("name, base_url, net_debit_cap 중 하나 이상을 넣어야 합니다")
         return self
 
 
 class BankAdmin(BankPublic):
     base_url: str
     active: bool
+    net_debit_cap: int
     created_at: datetime
 
 

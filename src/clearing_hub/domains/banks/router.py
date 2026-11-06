@@ -37,7 +37,7 @@ async def admin_register_bank(data: BankCreate, db: DB):
 
 @admin_router.patch("/{bank_code}", response_model=BankAdmin)
 async def admin_update_bank(bank_code: str, data: BankUpdate, db: DB):
-    """이름·base_url 변경 (은행 주소가 바뀌었을 때). 바꾼 뒤 /ping으로 확인한다."""
+    """이름·base_url·순채무한도 변경. 주소를 바꿨으면 /ping으로 확인한다."""
     async with db.begin():
         bank = await service.update_bank(db, bank_code, data)
     return BankAdmin.model_validate(bank, from_attributes=True)

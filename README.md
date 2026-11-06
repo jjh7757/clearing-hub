@@ -22,6 +22,7 @@ src/clearing_hub/
 │   ├── banks/              참가 은행 등록·키 발급 (/admin/banks), 목록 (/v1/banks)
 │   ├── accounts/           본인 명의 계좌 조회 (/v1/accounts/lookup), account_ref, 조회 기록 (/admin/account-lookups)
 │   ├── inquiry/            수취 조회 중계 (/v1/inquiry)
+│   ├── reserve/            예치금 원장(모의 당좌예금): 내 예치금 (/v1/reserve), 입출금·정정·분개 (/admin/reserve)
 │   └── transfers/          이체 접수·전달·상태 머신·결과 조회 (/v1/transfers), 관리 조회 (/admin/transfers)
 └── workers/retry.py        미확인(PENDING) 거래 확인 태스크
 src/bank_sim/main.py        가짜 은행 (SPEC 4·9.4절 참고 구현, 계좌번호 끝자리로 성공·실패·지연 재현)
@@ -99,5 +100,6 @@ docker logs clearing-hub 2>&1 | grep <request_id>
 ## 다음 단계
 
 - 관리자 JWT 로그인 (지금은 `ADMIN_TOKEN` 헤더), `hmac_secret` 암호화 저장
-- 정산 배치·정산표 (`settlements`), 관리 사이트(React)
+- 정산(마감 상계 → 대사 → 예치금 결제): [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md). 1단계 예치금 원장(`reserve/`)까지 구현
+- 관리 사이트(React)
 - AvengersBank에 허브 클라이언트와 `/interbank/*` 추가

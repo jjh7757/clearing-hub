@@ -5,6 +5,7 @@ from clearing_hub.core.exceptions import ApiException, BadRequest, NotFound
 from clearing_hub.core.signing import hash_api_key, new_api_key, new_secret
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.banks.schemas import BankCreate, BankUpdate
+from clearing_hub.domains.reserve.models import ReserveAccount
 
 
 async def get_bank(db: AsyncSession, bank_code: str) -> Bank | None:
@@ -38,6 +39,8 @@ async def register_bank(db: AsyncSession, data: BankCreate) -> tuple[Bank, str, 
         api_key_hash=hash_api_key(api_key), hmac_secret=secret,
     )
     db.add(bank)
+    await db.flush()  # reserve_accounts가 banks를 참조하므로 은행을 먼저 넣는다
+    db.add(ReserveAccount(bank_code=bank.bank_code, balance=0))  # 예치금 계좌 (잔액 0, SETTLEMENT_PLAN 2절 5번)
     await db.flush()
     return bank, api_key, secret
 
@@ -50,12 +53,14 @@ async def _require_bank(db: AsyncSession, bank_code: str) -> Bank:
 
 
 async def update_bank(db: AsyncSession, bank_code: str, data: BankUpdate) -> Bank:
-    """이름·base_url 변경. 진행 중인 재시도도 다음 호출부터 새 주소로 간다 (거래에는 주소를 저장하지 않는다)."""
+    """이름·base_url·순채무한도 변경. 진행 중인 재시도도 다음 호출부터 새 주소로 간다 (거래에는 주소를 저장하지 않는다)."""
     bank = await _require_bank(db, bank_code)
     if data.name is not None:
         bank.name = data.name
     if data.base_url is not None:
         bank.base_url = str(data.base_url).rstrip("/")
+    if data.net_debit_cap is not None:
+        bank.net_debit_cap = data.net_debit_cap
     await db.flush()
     return bank
 

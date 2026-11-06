@@ -1,8 +1,10 @@
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -213,12 +215,35 @@ def _invite_admin(invite: Invite) -> InviteAdmin:
                        status=service.invite_status(invite))
 
 
+def invite_message(code: str, expires_at: datetime, hub_url: str) -> str:
+    """관리자가 그대로 복사해 팀 담당자에게 DM으로 보낼 초대 문구 (docs/ONBOARDING.md 1)."""
+    expires = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=UTC)  # SQLite는 시간대 없이 준다
+    local = expires.astimezone(ZoneInfo(get_settings().settlement_timezone)).strftime("%Y-%m-%d %H:%M")
+    hub_public = _hub_public_key()
+    lines = [
+        "ClearingHub 참가 초대입니다.",
+        f"- 초대 코드: {code}",
+        f"- 만료: {local} (KST, {expires.strftime('%Y-%m-%dT%H:%M:%SZ')})",
+        f"- 허브 주소: {hub_url}",
+        "- 연동 규격: ClearingHub 저장소의 docs/SPEC.md (7절 연동 절차부터)",
+        f"- 허브 공개키: {hub_public}",
+        f"- 허브 공개키 지문: {fingerprint(hub_public)} (등록 응답의 hub_fingerprint가 이 값과 같은지 꼭 확인하세요)",
+        f"- 등록 방법: 키 쌍을 만들고 받는 쪽 API를 띄운 뒤 POST {hub_url}/v1/banks/register 에 "
+        "invite_code·name·base_url·public_key를 보냅니다 (SPEC 3.5)",
+        "초대 코드는 한 번만 쓸 수 있습니다. 공개 채널(GitHub·단체 채팅방 등)에 올리지 마세요.",
+    ]
+    return "\n".join(lines)
+
+
 @invite_admin_router.post("", response_model=InviteIssued, status_code=201)
-async def admin_create_invite(data: InviteCreate, db: DB):
-    """초대 코드 발급 (기본 7일, INVITE_TTL_DAYS). code는 이때만 보여 준다. 허브 공개키 지문과 함께 팀에 개별로 전달한다."""
+async def admin_create_invite(data: InviteCreate, db: DB, request: Request):
+    """초대 코드 발급 (기본 7일, INVITE_TTL_DAYS). code는 이때만 보여 준다.
+    message(초대 문구: 코드·만료·허브 주소·허브 공개키·지문·등록 방법)를 그대로 팀 담당자에게 개별로 보낸다."""
     async with db.begin():
         invite = await service.create_invite(db, data.note)
-    return InviteIssued(code=invite.code, note=invite.note, expires_at=invite.expires_at)
+    hub_url = (get_settings().hub_public_url or str(request.base_url)).rstrip("/")
+    return InviteIssued(code=invite.code, note=invite.note, expires_at=invite.expires_at,
+                        message=invite_message(invite.code, invite.expires_at, hub_url))
 
 
 @invite_admin_router.get("", response_model=list[InviteAdmin])

@@ -183,6 +183,7 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping
      sudo grep -q '^HUB_SIGNING_KEY=.\+' /srv/clearing-hub/.env || \
        echo "HUB_SIGNING_KEY=$(openssl genpkey -algorithm ed25519 -outform DER | tail -c 32 | base64)" | sudo tee -a /srv/clearing-hub/.env >/dev/null
      ```
+   - 초대 문구에 넣을 허브 주소: `.env`에 `HUB_PUBLIC_URL=https://clearing-hub.ai-agent-develop.cloud` (없으면 넣는다)
    - 가짜 은행 키·허브 공개키 → `sim.env`, 902 공개키 출력: 위 "가짜 은행 연결"의 첫 명령 (`SIM_HUB_SECRET`·`SIM_SIGNATURE_MODE` 줄도 지운다)
    - 허브 공개키 지문을 AvengersBank 팀에 개별로 전달한다 (그 팀이 `HUB_PUBLIC_KEY`로 넣는다). 지문 = 허브 공개키 raw 32바이트의 sha256 앞 16자: `echo "$HUB_PUB" | base64 -d | sha256sum | cut -c1-16`. 배포 뒤 `GET /v1/hub-key`의 `fingerprint`와 같아야 한다
 3. **배포**: `main` push → Actions → `deploy-app`. 마이그레이션 `f3b8d2a7c4e1`이 자동으로 돈다 (`hmac_secret`·`signature_mode` 삭제, `invites` 추가). 1을 못 했으면 지금 한다. AvengersBank 8d 배포도 이때 한다
@@ -244,6 +245,7 @@ curl -s https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id
 | | `INVITE_TTL_DAYS` | `7`(기본). 초대 코드 유효 기간 |
 | | `BANK_CODE_START` | `903`(기본). 셀프 등록 때 이 코드부터 비어 있는 가장 작은 코드를 준다 |
 | | `DEFAULT_NET_DEBIT_CAP` | `1000000000`(기본, 10억). 새로 등록하는 은행의 순채무한도 |
+| | `HUB_PUBLIC_URL` | `https://clearing-hub.ai-agent-develop.cloud`. 초대 문구(`POST /admin/invites`의 `message`)에 넣을 허브 주소. 비어 있으면 그 관리자 요청의 주소가 들어간다 (서버 안에서 내부 주소로 부르면 내부 주소) |
 | `sim.env` | `SIM_SIGNING_KEY` | **필수.** 가짜 은행 Ed25519 개인키. `/interbank/*` 2xx·4xx 응답에 응답 서명. 공개키는 902에 등록한다. 없거나 틀리면 컨테이너가 시작하지 않는다 |
 | | `SIM_HUB_PUBLIC_KEY` | 허브 공개키 (`GET /v1/hub-key`). 허브 요청 검증. 비어 있으면 검증을 건너뛴다 (로컬 시험용) |
 | | `SIM_DELAY_SECONDS` | `8` (허브 타임아웃 5초보다 길어야 지연 시나리오가 재현된다) |

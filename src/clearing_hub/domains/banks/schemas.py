@@ -126,6 +126,7 @@ class InviteIssued(BaseModel):
     code: str
     note: str
     expires_at: datetime
+    message: str  # 팀 담당자에게 그대로 DM으로 보낼 초대 문구 (코드·만료·허브 주소·허브 공개키·지문·등록 방법)
 
     @field_serializer("expires_at")
     def _time(self, value: datetime) -> str | None:

@@ -13,17 +13,33 @@ export HUB=https://clearing-hub.ai-agent-develop.cloud TOKEN=$(sudo grep '^ADMIN
 ## 1. 팀이 오면: 초대 코드 + 지문
 
 ```bash
-curl -s -X POST $HUB/admin/invites -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"note":"C팀 (홍길동)"}'
-```
-```bash
-curl -s $HUB/v1/hub-key
+curl -s -X POST $HUB/admin/invites -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"note":"C팀 (홍길동)"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["message"])'
 ```
 
-첫 응답의 `code`(`inv_…`, **이때만 보인다**, 7일 동안 한 번)와 둘째 응답의 `fingerprint`(허브 공개키 지문)를 **그 팀에만 개별 경로로**(DM 등, GitHub·단체 채팅방 X) 보낸다. 9절(본인 계좌 조회)에 참여하는 팀이면 `CI_KEY`도 같이 (`sudo grep '^CI_KEY=' /srv/clearing-hub/.env | cut -d= -f2`, DEPLOY.md "CI_KEY").
+출력된 **초대 문구(`message`)를 그대로 복사해 그 팀 담당자에게만 DM으로** 보낸다 (GitHub·단체 채팅방 X). 응답의 `code`(`inv_…`, 7일 동안 한 번)는 **이때만 보인다.** 문구에 들어 있는 것:
 
-보낼 문장 예:
+- 초대 코드와 만료 시각 (KST와 UTC)
+- 허브 주소: 설정 `HUB_PUBLIC_URL`, 없으면 이 요청의 주소. 서버 안에서 내부 주소로 부르면 그 주소가 들어가므로 운영 `.env`에는 `HUB_PUBLIC_URL`을 넣어 둔다
+- 연동 규격 위치 `docs/SPEC.md` (7절부터)
+- 허브 공개키와 지문 (등록 응답의 `hub_fingerprint`와 맞춰 보라는 말)
+- 등록 방법 한 줄: `POST /v1/banks/register`에 `invite_code`·`name`·`base_url`·`public_key`
+- "코드는 1회용이며 공개 채널에 올리지 말 것"
 
-> 초대 코드 `inv_…` (7일, 한 번만), 허브 공개키 지문 `…`. 연동 방법은 SPEC.md 7절. `POST /v1/banks/register`의 응답에서 `hub_fingerprint`가 이 지문과 같은지 꼭 확인하세요.
+문구 예 (값은 발급마다 다르다):
+
+```
+ClearingHub 참가 초대입니다.
+- 초대 코드: inv_…
+- 만료: 2026-11-13 12:00 (KST, 2026-11-13T03:00:00Z)
+- 허브 주소: https://clearing-hub.ai-agent-develop.cloud
+- 연동 규격: ClearingHub 저장소의 docs/SPEC.md (7절 연동 절차부터)
+- 허브 공개키: …
+- 허브 공개키 지문: … (등록 응답의 hub_fingerprint가 이 값과 같은지 꼭 확인하세요)
+- 등록 방법: 키 쌍을 만들고 받는 쪽 API를 띄운 뒤 POST https://clearing-hub.ai-agent-develop.cloud/v1/banks/register 에 invite_code·name·base_url·public_key를 보냅니다 (SPEC 3.5)
+초대 코드는 한 번만 쓸 수 있습니다. 공개 채널(GitHub·단체 채팅방 등)에 올리지 마세요.
+```
+
+공개키·지문은 `curl -s $HUB/v1/hub-key`의 값과 같다. 지문을 초대 문구와 같은 DM으로 받으니, 은행은 API 응답만 믿지 않고 이 값과 맞춰 볼 수 있다. 9절(본인 계좌 조회)에 참여하는 팀이면 `CI_KEY`도 같은 DM으로 (`sudo grep '^CI_KEY=' /srv/clearing-hub/.env | cut -d= -f2`, DEPLOY.md "CI_KEY").
 
 그다음은 은행이 한다: 키 쌍 만들기 → 받는 쪽 API 3개 → `POST /v1/banks/register` → ping 확인 → 가짜 은행 `902`로 보내기 시험.
 

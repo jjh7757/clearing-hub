@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     invite_ttl_days: int = Field(default=7, gt=0)  # 초대 코드 유효 기간
     bank_code_start: str = Field(default="903", pattern=r"^\d{3}$")  # 셀프 등록 때 이 코드부터 비어 있는 가장 작은 코드를 준다
     default_net_debit_cap: int = Field(default=1_000_000_000, ge=0)  # 새 은행의 순채무한도(원). 등록 직후부터 보낼 수 있게
+    # 은행이 부를 허브 주소 (초대 문구에 넣는다). 없으면 그 관리자 요청의 base URL. 프록시 뒤에서는 내부 주소가 나올 수 있어 운영에서는 넣는다
+    hub_public_url: str | None = None
 
     @field_validator("hub_signing_key", mode="before")
     @classmethod

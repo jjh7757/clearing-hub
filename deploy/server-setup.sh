@@ -96,6 +96,7 @@ RETRY_INTERVAL_SECONDS=60
 RETRY_MAX_COUNT=10
 MAX_TRANSFER_AMOUNT=100000000
 HUB_SIGNING_KEY=$(ed25519_private)
+HUB_PUBLIC_URL=https://clearing-hub.ai-agent-develop.cloud
 EOF
   chown ubuntu:ubuntu "$DIR/.env"
   chmod 600 "$DIR/.env"

@@ -94,6 +94,22 @@ async def test_invite_invalid(client):
     assert len((await client.get("/admin/banks", headers=ADMIN)).json()) == 1
 
 
+async def test_invite_message(client, monkeypatch):
+    """발급 응답의 message: 관리자가 그대로 DM으로 보낼 초대 문구 (ONBOARDING.md 1)."""
+    res = await client.post("/admin/invites", json={"note": "C팀"}, headers=ADMIN)
+    body = res.json()
+    message = body["message"]
+    for part in (body["code"], body["expires_at"], "http://hub", "docs/SPEC.md", HUB_PUBLIC_KEY, fingerprint(HUB_PUBLIC_KEY),
+                 "POST http://hub/v1/banks/register", "invite_code·name·base_url·public_key", "한 번만", "공개 채널"):
+        assert part in message, part
+    assert "KST" in message
+
+    monkeypatch.setattr(get_settings(), "hub_public_url", "https://clearing-hub.example.com/")
+    message = (await client.post("/admin/invites", json={}, headers=ADMIN)).json()["message"]
+    assert "- 허브 주소: https://clearing-hub.example.com\n" in message and "http://hub" not in message
+    assert "POST https://clearing-hub.example.com/v1/banks/register" in message
+
+
 async def test_invite_ttl(client):
     res = await client.post("/admin/invites", json={}, headers=ADMIN)
     expires = datetime.strptime(res.json()["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)

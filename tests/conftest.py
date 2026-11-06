@@ -7,6 +7,7 @@ os.environ["ADMIN_TOKEN"] = "test-admin-token-test-admin-token-0000"
 os.environ["RECEIVER_TIMEOUT_SECONDS"] = "0.3"
 os.environ["RETRY_INTERVAL_SECONDS"] = "3600"  # 테스트는 confirm_pending을 직접 부른다
 os.environ["RETRY_MAX_COUNT"] = "3"
+os.environ["SETTLEMENT_WORKER_ENABLED"] = "false"  # 테스트 DB에 run을 만들지 않게. 워커 함수는 테스트가 직접 부른다
 os.environ["SIM_DELAY_SECONDS"] = "1"  # 허브 타임아웃(0.3초)보다 길게
 
 import pytest

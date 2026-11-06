@@ -1,7 +1,7 @@
-"""정산 배치 DRAFT: 8단계 수집, 9단계 다자간 차액 계산 (SETTLEMENT_PLAN 2절 2·3·4번, 5.1).
+"""정산 배치: 8단계 수집·9단계 다자간 차액 계산(DRAFT), 11·12단계 확정·예치금 반영 (SETTLEMENT_PLAN 2절 2·3·4·7번, 5.1).
 
-커밋은 하지 않는다. 라우터(`async with db.begin()`)나 4단계 워커가 트랜잭션을 정한다.
-예치금 반영(11·12단계, `confirm` → `reserve.apply_instruction`)은 4단계다. 여기서는 지시서(`instruction_for`)만 만든다.
+커밋은 하지 않는다. 라우터(`async with db.begin()`)나 워커(`workers/settlement.py`)가 트랜잭션을 정한다.
+예치금은 이 도메인이 직접 바꾸지 않는다. `confirm`이 지시서(`instruction_for`)를 `reserve.apply_instruction`에 넘긴다 (2절 1번).
 """
 
 import logging
@@ -16,6 +16,9 @@ from sqlalchemy.orm import selectinload
 
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.exceptions import ApiException, NotFound
+from clearing_hub.domains.banks.models import Bank
+from clearing_hub.domains.reserve import service as reserve_service
+from clearing_hub.domains.reserve.models import PositionStatus
 from clearing_hub.domains.settlement.models import (
     PairDirection, SettlementPair, SettlementPosition, SettlementRun, SettlementStatus,
 )
@@ -71,7 +74,8 @@ async def create_draft(db: AsyncSession, settle_date: date | None, created_by: s
     4. 상계: 그 run의 거래를 (from_bank, to_bank)로 묶은 합계 하나에서 은행별 포지션과 쌍별 표를 만든다
     5. 검증: Σ net_amount = 0, 건수·금액이 수집한 것과 같아야 한다. 아니면 RuntimeError(계산 버그) → 롤백
 
-    거래가 0건이어도 run은 만든다 (tx_count 0, 포지션 없음). 이것도 DRAFT라 확정·취소 전에는 다음 run이 막힌다.
+    거래가 0건이어도 run은 만든다 (tx_count 0, 포지션 없음). 이것도 DRAFT라 확정·취소 전에는 다음 run이 막힌다
+    (일일 워커는 빈 run을 바로 확정한다 — `workers/settlement.run_daily`).
     """
     settle_date, cutoff_at = compute_cutoff(settle_date, _now())
     if (draft := await _current_draft(db)) is not None:
@@ -153,7 +157,7 @@ def _verify(run: SettlementRun, grouped_count: int) -> None:
 
 
 async def _lock_run(db: AsyncSession, run_id: int) -> SettlementRun:
-    """run 행을 잠그고 읽는다 (취소와 4단계 확정이 겹치지 않게). 없으면 404."""
+    """run 행을 잠그고 읽는다 (취소와 확정이 겹치지 않게, 확정이 두 번 돌지 않게). 없으면 404."""
     stmt = (select(SettlementRun).where(SettlementRun.run_id == run_id)
             .with_for_update().execution_options(populate_existing=True))
     if (run := await db.scalar(stmt)) is None:
@@ -165,18 +169,69 @@ def _not_found(run_id: int) -> ApiException:
     return NotFound("SETTLEMENT_NOT_FOUND", f"정산 run {run_id}을 찾을 수 없습니다")
 
 
+def _not_draft(run: SettlementRun, action: str) -> ApiException:
+    return ApiException(409, "SETTLEMENT_NOT_DRAFT", f"DRAFT인 정산만 {action}할 수 있습니다 (지금 {run.status})",
+                        extra={"run_id": run.run_id})
+
+
 async def cancel_draft(db: AsyncSession, run_id: int) -> SettlementRun:
     """DRAFT를 취소한다: 그 run의 거래를 미정산(settlement_run_id NULL)으로 되돌리고 run을 CANCELLED로.
     되돌린 거래는 다음 run에 다시 들어간다. 포지션·쌍별 표는 기록으로 남긴다. DRAFT가 아니면 409 SETTLEMENT_NOT_DRAFT."""
     run = await _lock_run(db, run_id)
     if run.status != SettlementStatus.DRAFT:
-        raise ApiException(409, "SETTLEMENT_NOT_DRAFT", f"DRAFT인 정산만 취소할 수 있습니다 (지금 {run.status})",
-                           extra={"run_id": run_id})
+        raise _not_draft(run, "취소")
     await db.execute(update(Transfer).where(Transfer.settlement_run_id == run_id).values(settlement_run_id=None)
                      .execution_options(synchronize_session=False))
     run.status = SettlementStatus.CANCELLED
     await db.flush()
     logger.warning("정산 DRAFT run %s 취소 (%s건 미정산으로 되돌림)", run_id, run.tx_count)
+    return run
+
+
+async def confirm(db: AsyncSession, run_id: int, *, confirmed_by: str = "admin", reason: str = "") -> SettlementRun:
+    """DRAFT를 확정한다: 정산 지시서를 예치금 원장에 반영하고 run을 SETTLED로 (5.1의 11·12단계).
+    호출한 쪽의 트랜잭션 하나 안에서 끝난다.
+
+    1. run 행을 잠근다(`_lock_run`, FOR UPDATE). DRAFT가 아니면 409 SETTLEMENT_NOT_DRAFT(`run_id`) — 두 번 확정,
+       취소와 겹친 확정을 막는다 (`cancel_draft`도 같은 잠금을 쓴다)
+    2. 포지션(은행 코드순) → 지시서 `instruction_for(run)` → `reserve.apply_instruction(db, run_id, 지시서)`
+       (분개의 created_by는 "settlement". 누가 확정했는지는 run의 `settled_by`에 적는다: 관리자 / "auto")
+    3. 결과(OK / OVERDRAWN / OVERDUE, 반영 뒤 잔액)를 포지션의 `result`·`balance_after`에 옮겨 적는다
+    4. `status = SETTLED`, `settled_at`, `settled_by`. 사유(`reason`)는 로그에만 남긴다
+    5. OVERDUE 은행이 있으면 logger.error (관리자 알림). 그 은행은 접수 때 순채무한도 검사에 걸려 송금이 막히고
+       받기만 된다. 관리자가 예치하면 풀린다 (2절 7번)
+
+    **순채무(exposure, 4.4)와의 관계**: exposure는 SETTLED가 아닌 run의 거래를 계속 센다. SETTLED로 바꾸는 것과
+    예치금 반영이 **같은 트랜잭션**이라, 커밋하는 순간 순채무에서 빠지는 금액과 잔액에 들어가는 금액이 동시에
+    바뀐다. 그래서 `available = balance + cap − exposure`는 확정 전후로 같다.
+
+    포지션이 없는 run(거래 0건)은 지시서가 빈 목록이고, `apply_instruction([])`은 합 0이라 아무것도 바꾸지 않고
+    지나간다. 그대로 SETTLED가 된다.
+    `apply_instruction`이 409 RESERVE_ALREADY_APPLIED를 던지면(run은 DRAFT인데 분개가 이미 있음 = 장부 불일치)
+    그대로 전파한다. 트랜잭션이 롤백돼 run은 DRAFT로 남는다. 다른 예외도 마찬가지로 아무것도 남지 않는다.
+    """
+    run = await _lock_run(db, run_id)
+    if run.status != SettlementStatus.DRAFT:
+        raise _not_draft(run, "확정")
+    run = await get_run(db, run_id)  # 포지션·쌍별 표 (잠금은 이미 잡았다)
+
+    results = await reserve_service.apply_instruction(db, run_id, instruction_for(run))
+    by_bank = {r.bank_code: r for r in results}
+    for position in run.positions:
+        result = by_bank[position.bank_code]
+        position.result, position.balance_after = result.status.value, result.balance_after
+    run.status = SettlementStatus.SETTLED
+    run.settled_at, run.settled_by = _now(), confirmed_by
+    await db.flush()
+
+    for r in results:
+        if r.status == PositionStatus.OVERDUE:
+            cap = (await db.get(Bank, r.bank_code)).net_debit_cap
+            logger.error("정산 run %s 확정: 은행 %s 예치금 부족 OVERDUE (잔액 %s원, 순채무한도 %s원). "
+                         "송금이 막힙니다. 관리자 예치가 필요합니다", run_id, r.bank_code, r.balance_after, cap,
+                         extra={"bank_code": r.bank_code})
+    logger.info("정산 run %s 확정 (%s%s): %s개 은행, %s건 %s원", run_id, confirmed_by,
+                f", 사유: {reason}" if reason else "", len(results), run.tx_count, run.total_amount)
     return run
 
 
@@ -207,6 +262,6 @@ async def run_transfers(db: AsyncSession, run_id: int) -> list[Transfer]:
 
 def instruction_for(run: SettlementRun) -> list[tuple[str, int]]:
     """포지션 → 정산 지시서 [(bank_code, net_amount)], 은행 코드순 (5.1의 11단계).
-    4단계 confirm이 이것을 `reserve.apply_instruction(db, run.run_id, ...)`에 넘긴다. positions가 읽혀 있어야 한다
+    `confirm`이 이것을 `reserve.apply_instruction(db, run.run_id, ...)`에 넘긴다. positions가 읽혀 있어야 한다
     (create_draft의 결과나 get_run)."""
     return [(p.bank_code, p.net_amount) for p in sorted(run.positions, key=lambda p: p.bank_code)]

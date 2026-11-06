@@ -47,8 +47,8 @@
 | 8 | 하루치 거래 수집 | `settlement/service.py: create_draft()` — 미정산 `COMPLETED` 거래를 UPDATE 한 문장으로 모아 `settlement_run_id`를 찍는다 | 완료 (3단계) |
 | 9 | 다자간 차액 계산 | `settlement/service.py: create_draft()` → `settlement_positions`, `settlement_pairs`, 검증 Σ net = 0 | 완료 (3단계) |
 | 10 | 대사 파일 전달 | `GET /v1/settlements/{run_id}` (은행용, 5단계), `GET /admin/settlements/{run_id}/transfers.csv` (3단계 완료) | 일부 |
-| 11 | 결제 지시 | `settlement/service.py: confirm()` → `reserve.service.apply_instruction(run_id, instruction_for(run))` | 이 계획 (`instruction_for`는 3단계에 있음) |
-| 12 | 중앙은행 원장 반영 | `reserve/service.py` — `reserve_accounts.balance` 갱신 + `reserve_ledger` 분개 (한 트랜잭션) | 이 계획 |
+| 11 | 결제 지시 | `settlement/service.py: confirm()` → `reserve.service.apply_instruction(run_id, instruction_for(run))`, 일일 배치 `workers/settlement.py` | 완료 (4단계) |
+| 12 | 중앙은행 원장 반영 | `reserve/service.py: apply_instruction()` — `reserve_accounts.balance` 갱신 + `reserve_ledger` 분개, 결과를 `settlement_positions.result`·`balance_after`에 (한 트랜잭션) | 완료 (4단계) |
 | 13 | 은행 장부 정리 | AvengersBank `interbank/settlement_sync.py` — 대사 → `SETTLE` 분개 | 이 계획 |
 | (사전) | 당좌예금 예치, 순채무한도 | `reserve` 도메인, `banks.net_debit_cap`, `transfers.service.accept_and_deliver()` 검사 | 이 계획 |
 | (신뢰) | 전자서명·부인방지 | `core/signing.py` Ed25519, 응답 서명, `transfer_evidence` (12절, 8단계) | 이 계획 |
@@ -140,6 +140,10 @@ exposure  = sent_open − recv_open
 
 ### 5.1 정산 배치 (8~12단계)
 
+일일 배치 `workers/settlement.py: settlement_loop()`(`SETTLEMENT_WORKER_ENABLED`)는 `next_cutoff()`까지 잠들었다가 `run_daily()`를 돈다.
+시작할 때 오늘(KST) 만든 run이 없고 배치 시각이 지났으면(허브가 꺼져 있었음, 10절) 바로 한 번 돈다(`needs_catch_up()`).
+확정하지 않은 DRAFT가 남아 있으면 그날은 경고만 남기고 건너뛴다(거래는 미정산으로 남아 다음 run에 들어간다). 거래 0건 run은 대사할 것이 없으므로 자동 확정 설정과 상관없이 바로 확정한다.
+
 ```
 workers/settlement.py  매일 00:05 KST, 어제 정산일 (또는 POST /admin/settlements/run {settle_date?})
  │
@@ -160,19 +164,22 @@ workers/settlement.py  매일 00:05 KST, 어제 정산일 (또는 POST /admin/se
  │      (취소) POST /admin/settlements/{run_id}/cancel: DRAFT만. 거래 settlement_run_id → NULL, run → CANCELLED
  │
  ├ 10. (대사 기간) 은행이 GET /v1/settlements/{run_id}로 자기 몫을 받아 맞춰 본다
- │      SETTLEMENT_AUTO_CONFIRM=true 면 이 단계를 건너뛰고 바로 11로
+ │      SETTLEMENT_AUTO_CONFIRM=true 면 이 단계를 건너뛰고 바로 11로 (워커 run_daily가 이어서 confirm)
  │
- ├ 11. confirm(run)                [트랜잭션 2]
- │      run.status가 DRAFT인지 SELECT ... FOR UPDATE 로 확인 (두 번 확정 방지)
- │      instruction = [(bank_code, net_amount) ...]  ← positions에서 만든다
- │      reserve.apply_instruction(run_id, instruction)   ← reserve 도메인은 이것만 받는다
+ ├ 11. settlement.service.confirm(run_id, confirmed_by)   [트랜잭션 2]  (4단계 완료)
+ │      _lock_run: run 행 SELECT ... FOR UPDATE, DRAFT가 아니면 409 SETTLEMENT_NOT_DRAFT (두 번 확정·취소와 경쟁 방지)
+ │      instruction_for(run) = [(bank_code, net_amount) ...]  ← positions에서, 은행 코드순
+ │      reserve.service.apply_instruction(db, run_id, instruction)   ← reserve 도메인은 이것만 받는다
+ │      (이미 분개가 있으면 409 RESERVE_ALREADY_APPLIED 그대로 전파 → 롤백, run은 DRAFT로 남는다)
  │
- └ 12. reserve.apply_instruction   [같은 트랜잭션]
+ └ 12. reserve.service.apply_instruction   [같은 트랜잭션]  (4단계 완료)
         은행마다: reserve_accounts 행 잠금 → balance += net_amount
-                  reserve_ledger에 SETTLE_CREDIT / SETTLE_DEBIT 분개
-                  result = OK / OVERDRAWN(balance < 0) / OVERDUE(balance < −cap)
-        run.status = SETTLED, settled_at
-        OVERDUE 은행이 있으면 logger.error (관리자 알림)
+                  reserve_ledger에 SETTLE_CREDIT / SETTLE_DEBIT 분개 (created_by "settlement")
+                  PositionResult.status = OK / OVERDRAWN(balance < 0) / OVERDUE(balance < −cap)
+        confirm이 결과를 positions.result·balance_after에 옮겨 적고
+        run.status = SETTLED, settled_at, settled_by (관리자 "admin" / 워커 "auto"). 사유는 로그에만
+        OVERDUE 은행이 있으면 logger.error (은행·잔액·한도, 관리자 알림)
+        SETTLED와 잔액이 한 커밋에 바뀌므로 순채무(4.4)에서 빠지는 금액과 잔액에 들어가는 금액이 동시에 바뀐다
 ```
 
 `reserve.apply_instruction()`의 입력은 `(run_id, [(bank_code, amount)])`뿐이다. 지시서는 `settlement.service.instruction_for(run)`이 포지션에서 만든다(은행 코드순). 이 함수를 HTTP 호출로 바꾸면 예치금 원장을 별도 서버로 뗄 수 있다 (2절 1번).
@@ -235,7 +242,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | GET | `/admin/settlements/{run_id}/transfers` | 거래 목록 JSON (`transfer_id`, `from_bank`, `to_bank`, `amount`, `finished_at`, `holder_name`) |
 | GET | `/admin/settlements/{run_id}/transfers.csv` | 같은 내용 CSV (UTF-8, BOM 없음, 헤더 행, `settlement_{run_id}.csv`) |
 | POST | `/admin/settlements/{run_id}/cancel` | DRAFT 취소: 거래를 미정산으로 되돌림. DRAFT가 아니면 409 `SETTLEMENT_NOT_DRAFT` |
-| POST | `/admin/settlements/{run_id}/confirm` | 확정 (11·12단계). `{"reason": ...}` |
+| POST | `/admin/settlements/{run_id}/confirm` | 확정 (11·12단계). 본문 `{reason?}`(200자까지, 로그에만) → 200 run 상세: `status: SETTLED`, `settled_at`, `settled_by: "admin"`, 포지션마다 `result`(OK / OVERDRAWN / OVERDUE)·`balance_after`. DRAFT가 아니면 409 `SETTLEMENT_NOT_DRAFT`(`run_id`), 없으면 404. 이미 분개가 있으면 409 `RESERVE_ALREADY_APPLIED`(run은 DRAFT로 남음) |
 | GET | `/admin/reserve` | 은행별 예치금·한도·exposure |
 | POST | `/admin/reserve/{bank_code}/deposit` | `{amount, memo}` 예치 (DEPOSIT 분개) |
 | POST | `/admin/reserve/{bank_code}/withdraw` | `{amount, memo}` 인출. `balance − amount < −cap` 이면 거절 |
@@ -263,7 +270,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | 1. 예치금 원장 | 2일 | `domains/reserve/` (models·schemas·service·router), Alembic `reserve_accounts`·`reserve_ledger`·`banks.net_debit_cap`, 관리자 입출금·정정 API, `GET /v1/reserve` | 입금·인출·정정이 분개와 잔액에 같이 남고, 인출 한도 검사가 된다 |
 | 2. 순채무한도 검사 | 1일 | `transfers/service.py` 4.4 검사, 은행 등록 시 `reserve_accounts` 행 자동 생성 | 예치금 0·한도 0인 은행의 이체가 `LIMIT_EXCEEDED FAILED`로 거절되고, 예치금을 넣으면 된다. 기존 테스트는 conftest에서 한도를 넉넉히 줘 그대로 통과 |
 | 3. 정산 배치 (DRAFT) **완료** | 2일 | `domains/settlement/` models·service(`create_draft`·`cancel_draft`·`instruction_for`), Alembic `settlement_*`·`transfers.settlement_run_id`·`reserve_ledger.run_id` FK, `POST /admin/settlements/run`, 취소, 조회 API, CSV, `exposure`의 미정산 조건, `_set_status` 방어 | 손으로 계산한 하루치 상계와 같다. `Σ net = 0`. DRAFT가 있는데 또 돌리면 409, 취소하면 다시 돌릴 수 있다. 늦게 COMPLETED된 거래가 다음 정산에 들어간다 |
-| 4. 확정·예치금 반영 | 1.5일 | `confirm()` → `reserve.apply_instruction()`, `workers/settlement.py`(매일 자동 DRAFT, 설정 시 자동 확정), `OVERDRAWN`·`OVERDUE` 처리 | 확정 뒤 잔액이 포지션만큼 바뀌고 분개가 남는다. 두 번 확정 불가. `OVERDUE` 은행은 송금이 막히고 받기는 된다 |
+| 4. 확정·예치금 반영 **완료** | 1.5일 | `confirm()` → `reserve.apply_instruction()`, `workers/settlement.py`(매일 자동 DRAFT, 설정 시 자동 확정, 시작 때 catch-up, 0건 run 자동 확정, `SETTLEMENT_WORKER_ENABLED`), `OVERDRAWN`·`OVERDUE` 처리, `POST /admin/settlements/{run_id}/confirm` | 확정 뒤 잔액이 포지션만큼 바뀌고 분개가 남는다. 두 번 확정 불가. `OVERDUE` 은행은 송금이 막히고 받기는 된다 |
 | 5. 은행용 대사 API | 1일 | `GET /v1/settlements`, `/v1/settlements/{run_id}` | 은행이 자기 거래만 본다. 다른 은행 포지션은 안 보인다 |
 | 6. AvengersBank 대사·정리 | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `settlement_reconciliations`, `settlement_sync.py` 워커, `hub_client.get_settlement()`, 관리자 조회 API 1개 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록을 일부러 하나 지우면 `MISMATCH`와 diff가 나온다 |
 | 7. 시연·문서 | 1일 | README·DEPLOY 갱신, 시연 대본(8절), 가짜 은행 `902` 예치금 시드 | 8절 시나리오가 끝까지 돈다 |
@@ -333,7 +340,7 @@ AvengersBank `tests/test_settlement_sync.py`:
 | 배치가 도는 중에 거래가 COMPLETED 됨 | `finished_at < cutoff_at`로 자르고, 늦은 것은 다음 run (2절 3번). `create_draft`의 UPDATE 한 문장으로 경쟁을 없앤다 |
 | 관리자 두 명이 동시에 run | 서비스가 DRAFT를 먼저 확인하고, 둘 다 지나치면 부분 유니크 인덱스가 두 번째를 막는다 (409). 수집 UPDATE는 `settlement_run_id IS NULL` 조건이라 같은 거래가 두 run에 들어가지 않는다 |
 | 허브와 은행의 날짜 경계가 다름 | 둘 다 KST, 허브 `finished_at` 기준. 은행은 허브가 준 목록을 **기준**으로 삼고 자기 장부에서 그 ID를 찾는다 (날짜로 자르지 않는다) |
-| 허브 재시작 중 배치가 안 돎 | 워커 시작 때 "어제 run이 없으면 지금 만든다". 관리자 수동 실행도 있다 |
+| 허브 재시작 중 배치가 안 돎 | 워커 시작 때 "오늘 만든 run이 없고 배치 시각이 지났으면 지금 돌린다" (`needs_catch_up`, 4단계). 관리자 수동 실행도 있다 |
 | 예치금을 실제 돈으로 오해 | 화면·문서에 "모의 예치금"이라고 적는다. 입출금은 관리자 API뿐이다 |
 | 기존 참가 은행이 갑자기 막힘 | 배포 직후 관리자가 은행마다 예치금 또는 한도를 넣는다. 배포 순서를 DEPLOY.md에 적는다 |
 | 정산된 거래를 고쳐야 할 때 | 거래는 안 고친다. `ADJUST` 분개 + 사유. 다음 정산에는 영향 없음 |

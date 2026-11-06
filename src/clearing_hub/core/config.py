@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     max_transfer_amount: int = Field(default=100_000_000, gt=0)  # 1회 상한(원)
     lookup_daily_limit: int = Field(default=10, gt=0)  # 본인 계좌 조회: 은행별 같은 CI 24시간 횟수 (SPEC 9.2)
     account_ref_ttl_seconds: int = Field(default=1800, gt=0)  # account_ref 유효 시간 (SPEC 9.3)
-    # 정산 (SETTLEMENT_PLAN 2절 3·4번). 지금은 설정만 있고, 워커는 4단계에서 쓴다
+    # 정산 (SETTLEMENT_PLAN 2절 3·4번, 5.1). 일일 배치는 workers/settlement.py
+    settlement_worker_enabled: bool = True  # false면 일일 배치 태스크를 띄우지 않는다 (테스트, 수동 운영)
     settlement_cutoff_time: str = Field(default="00:05", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")  # 매일 마감 배치 시각 (HH:MM)
     settlement_timezone: str = "Asia/Seoul"  # 정산일·마감 시각의 기준 시간대
     settlement_auto_confirm: bool = False  # true면 DRAFT를 대사 없이 바로 확정 (시연용)

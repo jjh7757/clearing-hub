@@ -1,7 +1,7 @@
-"""정산 배치 DRAFT: 수집·상계 (SETTLEMENT_PLAN 2절 2·3·4·8번, 4.4, 5.1의 8·9단계, 6.2, 7절 3단계, 8절 S1~S4·S9).
+"""정산 배치 DRAFT: 수집·상계 (SETTLEMENT_PLAN 2절 2·3·4·8번, 4.4, 5.1의 8·9단계, 6.2, 7절 3단계, 8절 S1~S4·S9·E1).
 
-이체는 허브 API로 만든다 (`banks` 픽스처는 한도가 넉넉하다). 예치금 확정(confirm)은 4단계라, 확정이 필요한 시험은
-`_settle()`이 4단계 confirm이 할 일(지시서 반영 + SETTLED)을 직접 한다.
+이체는 허브 API로 만든다 (`banks` 픽스처는 한도가 넉넉하다). 확정이 필요한 시험은 `POST /admin/settlements/{id}/confirm`을
+부른다 (`_confirm`). 확정 자체의 시험(S5~S7)과 일일 워커는 test_settlement_confirm.py.
 """
 
 import csv
@@ -15,9 +15,8 @@ from sqlalchemy import select, update
 import bank_sim.main as sim
 
 from clearing_hub.core.database import SessionLocal
-from clearing_hub.domains.reserve import service as reserve
 from clearing_hub.domains.settlement import service as settlement
-from clearing_hub.domains.settlement.models import SettlementRun, SettlementStatus
+from clearing_hub.domains.settlement.models import SettlementRun
 from clearing_hub.domains.transfers.exposure import open_exposure
 from clearing_hub.domains.transfers.models import Transfer, TransferStatus
 from clearing_hub.domains.transfers.service import _set_status, confirm_pending
@@ -49,13 +48,11 @@ async def _transfer(transfer_id: str) -> Transfer:
         return await db.get(Transfer, transfer_id)
 
 
-async def _settle(run_id: int) -> None:
-    """4단계 confirm 대신: 지시서를 예치금에 반영하고 run을 SETTLED로 (한 트랜잭션)."""
-    async with SessionLocal() as db, db.begin():
-        run = await settlement.get_run(db, run_id)
-        await reserve.apply_instruction(db, run_id, settlement.instruction_for(run))
-        run.status = SettlementStatus.SETTLED
-        run.settled_at, run.settled_by = datetime.now(UTC), "test"
+async def _confirm(client, run_id: int) -> dict:
+    """확정 (11·12단계): 지시서를 예치금에 반영하고 run을 SETTLED로."""
+    res = await client.post(f"/admin/settlements/{run_id}/confirm", json={}, headers=ADMIN)
+    assert res.status_code == 200 and res.json()["status"] == "SETTLED", res.text
+    return res.json()
 
 
 async def _s1_transfers(banks, monkeypatch) -> list[str]:
@@ -117,7 +114,7 @@ async def test_s1_multilateral_net(client, banks, monkeypatch):
 
 
 async def test_instruction_for(client, banks, monkeypatch):
-    """포지션 → 정산 지시서, 은행 코드순 (4단계 confirm이 reserve.apply_instruction에 넘긴다)."""
+    """포지션 → 정산 지시서, 은행 코드순 (confirm이 reserve.apply_instruction에 넘긴다)."""
     await _s1_transfers(banks, monkeypatch)
     async with SessionLocal() as db, db.begin():
         run = await settlement.create_draft(db, _today())
@@ -185,7 +182,7 @@ async def test_s3_late_completed_goes_to_next_run(client, banks, monkeypatch):
     late = await _send(sender, "0003", 20_000)  # 응답 없음 → PENDING
     first = await _run(client, _today())
     assert first["tx_count"] == 1
-    await _settle(first["run_id"])
+    await _confirm(client, first["run_id"])
 
     sim.received.clear()  # 지연 중이던 첫 요청은 버리고 재전달만 본다 (test_transfers의 0003 시험과 같은 방식)
     monkeypatch.setenv("SIM_DELAY_SECONDS", "0")  # 재시도 때는 은행이 정상 응답
@@ -245,7 +242,7 @@ async def test_s4_single_draft_and_cancel(client, banks, monkeypatch):
     for tid in ids:
         assert (await _transfer(tid)).settlement_run_id == second["run_id"]
 
-    await _settle(second["run_id"])  # 확정된 run은 취소할 수 없다
+    await _confirm(client, second["run_id"])  # 확정된 run은 취소할 수 없다
     res = await client.post(f"/admin/settlements/{second['run_id']}/cancel", headers=ADMIN)
     assert res.status_code == 409 and res.json()["error"] == "SETTLEMENT_NOT_DRAFT"
     assert (await _transfer(ids[0])).settlement_run_id == second["run_id"]
@@ -352,7 +349,7 @@ async def test_exposure_moves_into_balance_on_settle(client, banks, monkeypatch,
     retry = transfer_payload("110-123-0001", amount=50_000)
     assert (await sender.post("/v1/transfers", retry)).json()["error"] == "LIMIT_EXCEEDED"
 
-    await _settle(run["run_id"])  # 확정: 901 −7만, 902 +7만이 예치금으로
+    await _confirm(client, run["run_id"])  # 확정: 901 −7만, 902 +7만이 예치금으로
     async with SessionLocal() as db:
         assert await open_exposure(db, "901") == 0 and await open_exposure(db, "902") == 0
     assert await _reserve(sender) == {"bank_code": "901", "balance": 30_000, "net_debit_cap": 0, "exposure": 0,

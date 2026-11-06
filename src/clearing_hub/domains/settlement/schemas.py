@@ -20,6 +20,12 @@ class SettlementRunCreate(BaseModel):
     settle_date: date | None = Field(default=None, description="정산일 YYYY-MM-DD. 생략하면 어제, 오늘이면 지금 즉시 마감")
 
 
+class SettlementConfirm(BaseModel):
+    """POST /admin/settlements/{run_id}/confirm 본문. 본문을 생략해도 된다 (SETTLEMENT_PLAN 6.2)."""
+
+    reason: str = Field(default="", max_length=200, description="확정 사유 (로그에 남긴다)")
+
+
 class SettlementRunOut(BaseModel):
     run_id: int
     settle_date: date

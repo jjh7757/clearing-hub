@@ -10,10 +10,11 @@ from clearing_hub.core.database import get_db
 from clearing_hub.domains.settlement import service
 from clearing_hub.domains.settlement.models import SettlementRun
 from clearing_hub.domains.settlement.schemas import (
-    PairOut, PositionOut, SettlementDetail, SettlementRunCreate, SettlementRunOut, SettlementTransferOut,
+    PairOut, PositionOut, SettlementConfirm, SettlementDetail, SettlementRunCreate, SettlementRunOut,
+    SettlementTransferOut,
 )
 
-# 관리자용 정산 API (SETTLEMENT_PLAN 6.2). 확정(confirm, 11·12단계)은 4단계, 은행용 대사 API(/v1/settlements)는 5단계
+# 관리자용 정산 API (SETTLEMENT_PLAN 6.2). 은행용 대사 API(/v1/settlements)는 5단계
 admin_router = APIRouter(prefix="/admin/settlements", tags=["admin"], dependencies=[Depends(require_admin)])
 
 DB = Annotated[AsyncSession, Depends(get_db)]
@@ -79,3 +80,13 @@ async def admin_cancel_settlement(run_id: int, db: DB):
     async with db.begin():
         run = await service.cancel_draft(db, run_id)
     return SettlementRunOut.model_validate(run, from_attributes=True)
+
+
+@admin_router.post("/{run_id}/confirm", response_model=SettlementDetail)
+async def admin_confirm_settlement(run_id: int, db: DB, data: SettlementConfirm | None = None):
+    """확정 (11·12단계): 은행별 차액을 예치금 원장에 반영하고 run을 SETTLED로. 본문 `{reason?}`(200자까지, 로그에 남김).
+    응답의 포지션에 `result`(OK / OVERDRAWN / OVERDUE)와 `balance_after`(반영 뒤 잔액)가 채워진다.
+    DRAFT가 아니면 409 SETTLEMENT_NOT_DRAFT (`run_id`), 없으면 404. 확정한 run은 취소할 수 없다."""
+    async with db.begin():
+        run = await service.confirm(db, run_id, confirmed_by="admin", reason=data.reason if data else "")
+    return _detail(run)

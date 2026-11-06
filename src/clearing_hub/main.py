@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 
+from clearing_hub.core.config import get_settings
 from clearing_hub.core.database import engine
 from clearing_hub.core.exception_handlers import register_exception_handlers
 from clearing_hub.core.log_setup import configure_logging
@@ -18,17 +19,22 @@ from clearing_hub.domains.settlement.router import admin_router as settlement_ad
 from clearing_hub.domains.transfers.router import admin_router as transfer_admin_router
 from clearing_hub.domains.transfers.router import router as transfer_router
 from clearing_hub.workers.retry import retry_loop
+from clearing_hub.workers.settlement import settlement_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(retry_loop())  # 미확인 거래 재시도
+    tasks = [asyncio.create_task(retry_loop())]  # 미확인 거래 재시도
+    if get_settings().settlement_worker_enabled:
+        tasks.append(asyncio.create_task(settlement_loop()))  # 일일 정산 배치 (SETTLEMENT_PLAN 5.1)
     try:
         yield
     finally:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         await engine.dispose()
 
 

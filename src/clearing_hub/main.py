@@ -48,4 +48,4 @@ app.include_router(reserve_admin_router)
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v0.5.1"}  # docs/SPEC.md 버전과 맞춘다
+    return {"service": "ClearingHub", "spec": "v0.5.2"}  # docs/SPEC.md 버전과 맞춘다

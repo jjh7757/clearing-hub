@@ -13,6 +13,12 @@ from tests.conftest import ADMIN
 pytestmark = pytest.mark.anyio
 
 
+@pytest.fixture
+def net_debit_cap() -> int:
+    """이 파일은 한도 0에서 시작하는 것을 검사한다 (conftest의 넉넉한 기본 한도를 끈다)."""
+    return 0
+
+
 async def _deposit(client, bank_code: str, amount: int, memo: str = ""):
     return await client.post(f"/admin/reserve/{bank_code}/deposit", json={"amount": amount, "memo": memo}, headers=ADMIN)
 

@@ -69,6 +69,16 @@ async def _lock(db: AsyncSession, bank_code: str) -> ReserveAccount:
     return await db.scalar(stmt)
 
 
+async def lock_for_check(db: AsyncSession, bank_code: str) -> ReserveAccount:
+    """이체 접수 때 순채무한도 검사용 잠금 (SETTLEMENT_PLAN 5.2). 잠근 시점의 잔액이 든 계좌를 돌려준다.
+
+    같은 은행의 이체 두 건이 동시에 들어와 둘 다 한도 검사를 통과하는 것을 막는다: 뒤의 요청은 앞의 요청이
+    접수를 커밋할 때까지 기다렸다가, 앞 거래가 들어간 순채무로 다시 계산한다. 잠금은 호출한 쪽의 다음
+    커밋·롤백에서 풀린다 (이체 접수는 바로 뒤에 커밋하므로 짧다). 잔액은 바꾸지 않는다.
+    """
+    return await _lock(db, bank_code)
+
+
 async def _post(db: AsyncSession, account: ReserveAccount, kind: ReserveLedgerKind, amount: int, *,
                 run_id: int | None = None, memo: str = "", created_by: str) -> ReserveLedgerEntry:
     """잔액 갱신 + 분개 + balance_after (모든 변동의 공통 경로). 행을 잠근 뒤 바꾼다.
@@ -185,21 +195,22 @@ def _summary(bank: Bank, balance: int, exposure: int) -> dict:
             "available": balance + bank.net_debit_cap - exposure}
 
 
-async def summary(db: AsyncSession, bank_code: str) -> dict:
-    """balance, net_debit_cap, exposure, available = balance + net_debit_cap − exposure (SETTLEMENT_PLAN 6.1)."""
+async def summary(db: AsyncSession, bank_code: str, exposure: int) -> dict:
+    """balance, net_debit_cap, exposure, available = balance + net_debit_cap − exposure (SETTLEMENT_PLAN 6.1).
+
+    exposure(미정산 순채무, 4.4)는 이 도메인이 계산하지 않고 받는다. reserve는 transfers를 읽지 않기 때문이다
+    (2절 1번). 라우터가 `transfers.exposure.open_exposure`로 계산해 넘긴다."""
     bank = await _ensure_account(db, bank_code)
     account = await db.get(ReserveAccount, bank_code)
-    # TODO 2단계: 미정산 순채무(SETTLEMENT_PLAN 4.4). 이 도메인은 transfers를 읽지 않으므로(2절 1번)
-    #   transfers 쪽 함수가 계산한 값을 인자로 받는 방식으로 넣는다. 지금은 0
-    exposure = 0
     return _summary(bank, account.balance, exposure)
 
 
-async def list_admin(db: AsyncSession) -> list[dict]:
-    """등록된 은행 전부의 예치금. 계좌가 아직 없는 은행은 잔액 0으로 보여 주고 만들지는 않는다."""
+async def list_admin(db: AsyncSession, exposures: dict[str, int]) -> list[dict]:
+    """등록된 은행 전부의 예치금. 계좌가 아직 없는 은행은 잔액 0으로 보여 주고 만들지는 않는다.
+    exposures는 은행 코드 → 미정산 순채무 (summary와 같은 이유로 밖에서 받는다). 없는 은행은 0."""
     stmt = (select(Bank, ReserveAccount).outerjoin(ReserveAccount, ReserveAccount.bank_code == Bank.bank_code)
             .order_by(Bank.bank_code))
     rows = (await db.execute(stmt)).all()
-    # TODO 2단계: exposure (summary와 같은 방식)
-    return [{**_summary(bank, account.balance if account else 0, 0), "updated_at": account.updated_at if account else None}
+    return [{**_summary(bank, account.balance if account else 0, exposures.get(bank.bank_code, 0)),
+             "updated_at": account.updated_at if account else None}
             for bank, account in rows]

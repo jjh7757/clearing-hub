@@ -70,11 +70,29 @@ async def register_bank(client: AsyncClient, bank_code: str, name: str, base_url
     return SignedBank(client, bank_code, data["api_key"], data["secret"])
 
 
+GENEROUS_CAP = 1_000_000_000  # 10억: 이체 테스트가 순채무한도(SETTLEMENT_PLAN 4.4)에 걸리지 않을 만큼
+
+
+async def set_net_debit_cap(client: AsyncClient, bank_code: str, cap: int) -> None:
+    res = await client.patch(f"/admin/banks/{bank_code}", json={"net_debit_cap": cap}, headers=ADMIN)
+    assert res.status_code == 200, res.text
+
+
 @pytest.fixture
-async def banks(client, monkeypatch):
+def net_debit_cap() -> int:
+    """`banks` 픽스처가 901·902에 줄 순채무한도. 예치금 0·한도 0이면 송금이 막히므로 기본은 넉넉히 준다.
+    한도 0에서 시작해야 하는 테스트 파일은 이 픽스처를 0으로 덮어쓴다 (test_reserve, test_net_debit_cap)."""
+    return GENEROUS_CAP
+
+
+@pytest.fixture
+async def banks(client, monkeypatch, net_debit_cap):
     """901 = 보내는 은행, 902 = 받는 은행(bank_sim). bank_sim은 902의 secret으로 허브 서명을 검증한다."""
     sender = await register_bank(client, "901", "AvengersBank")
     receiver = await register_bank(client, "902", "SimBank")
+    if net_debit_cap:
+        for code in ("901", "902"):
+            await set_net_debit_cap(client, code, net_debit_cap)
     monkeypatch.setenv("SIM_HUB_SECRET", receiver.secret)
     return sender, receiver
 

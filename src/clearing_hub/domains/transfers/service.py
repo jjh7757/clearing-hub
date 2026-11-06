@@ -16,6 +16,8 @@ from clearing_hub.core.exceptions import ApiException, BadRequest, Forbidden, No
 from clearing_hub.domains.accounts import service as account_service
 from clearing_hub.domains.banks import service as bank_service
 from clearing_hub.domains.banks.models import Bank
+from clearing_hub.domains.reserve import service as reserve_service
+from clearing_hub.domains.transfers.exposure import open_exposure
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
 from clearing_hub.domains.transfers.schemas import TransferRequest, TransferResolve
 
@@ -66,7 +68,11 @@ async def accept_and_deliver(
 ) -> tuple[Transfer, bool]:
     """이체 접수 → 받는 은행 호출. (transfer, 이미 있던 거래인지)를 돌려준다.
 
-    같은 transfer_id가 다시 오면 처리하지 않고 저장된 결과를 돌려준다 (멱등, SPEC 3.3).
+    같은 transfer_id가 다시 오면 처리하지 않고 저장된 결과를 돌려준다 (멱등, SPEC 3.3). 이미 접수된 거래이므로
+    순채무한도 검사도 하지 않는다.
+
+    접수 전 검사 순서: 1회 상한 → SAME_BANK → 받는 은행 → account_ref → 순채무한도(_check_net_debit_cap).
+    순채무한도 검사는 보내는 은행의 예치금 행을 잠그고 하며, 잠금은 바로 뒤 접수 저장 커밋에서 풀린다.
     """
     existing = await db.get(Transfer, data.transfer_id)
     if existing is not None:
@@ -83,6 +89,7 @@ async def accept_and_deliver(
     to_account = data.to_account
     if data.to_account_ref is not None:  # 본인 계좌 조회로 받은 참조값 → 실제 계좌번호 (SPEC 9.3)
         to_account = await account_service.resolve_ref(db, sender, data.to_account_ref, data.to_bank, data.transfer_id)
+    await _check_net_debit_cap(db, sender, data)
 
     # 1) 접수 저장을 먼저 커밋한다. 이후 은행 호출 중에 허브가 죽어도 거래 기록은 남는다
     transfer = Transfer(**data.model_dump(exclude={"to_account", "to_account_ref"}), to_account=to_account,
@@ -99,6 +106,25 @@ async def accept_and_deliver(
     _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
     await db.commit()
     return transfer, False
+
+
+async def _check_net_debit_cap(db: AsyncSession, sender: Bank, data: TransferRequest) -> None:
+    """미정산 순채무 + amount ≤ 예치금 + 순채무한도가 아니면 400 LIMIT_EXCEEDED (SETTLEMENT_PLAN 2절 6번, 4.4·5.2).
+
+    보내는 은행이 예치금 없이 보내는 것을 막는다 (담보·일중당좌대출 역할). 1회 상한과 같은 코드이므로 message로 구분한다.
+    BadRequest는 라우터가 `status: "FAILED"`를 붙여 돌려주므로 보내는 은행은 출금을 되돌린다 (SPEC 3.3 접수 전 거절).
+    거래를 저장하기 전이라 허브에 거래가 남지 않는다.
+
+    예치금 행을 SELECT ... FOR UPDATE로 잠근 **뒤에** 순채무를 계산한다. 같은 은행의 동시 접수 두 건이 둘 다
+    통과하지 않게 하기 위해서다: 뒤의 요청은 앞의 요청이 접수를 커밋할 때까지 기다리고, 그다음 계산하는 순채무에는
+    앞의 거래(DELIVERING)가 들어 있다. 잠금은 호출한 쪽의 접수 저장 커밋(또는 거절 뒤 세션 롤백)에서 풀린다.
+    """
+    account = await reserve_service.lock_for_check(db, sender.bank_code)
+    exposure = await open_exposure(db, sender.bank_code)
+    if exposure + data.amount > account.balance + sender.net_debit_cap:
+        raise BadRequest("LIMIT_EXCEEDED",
+                         f"순채무한도를 넘었습니다 (예치금 {account.balance:,}원 + 한도 {sender.net_debit_cap:,}원, "
+                         f"미정산 순채무 {exposure:,}원, 요청 {data.amount:,}원)", data.transfer_id)
 
 
 async def get_transfer(db: AsyncSession, sender: Bank, transfer_id: str) -> Transfer:

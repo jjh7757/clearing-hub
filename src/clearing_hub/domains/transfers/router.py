@@ -46,7 +46,8 @@ async def create_transfer(data: TransferRequest, db: DB, sender: Sender):
     try:
         transfer, _ = await service.accept_and_deliver(db, sender, data)
     except ApiException as exc:
-        # 접수 전 거절(SAME_BANK·LIMIT_EXCEEDED·BANK_NOT_FOUND·BANK_INACTIVE·ACCOUNT_REF_INVALID): 거래가 허브에 없으므로
+        # 접수 전 거절(SAME_BANK·LIMIT_EXCEEDED(1회 상한·순채무한도)·BANK_NOT_FOUND·BANK_INACTIVE·ACCOUNT_REF_INVALID):
+        # 거래가 허브에 없으므로
         # 확정 실패다. `status: FAILED`를 붙여 보내는 은행이 되돌려도 된다고 알린다 (SPEC 3.3·6).
         # 403 FORBIDDEN(남의 거래 ID)은 그 거래가 있다는 뜻이라 FAILED가 아니다
         if exc.status_code not in (400, 404):

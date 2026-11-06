@@ -1,7 +1,7 @@
 # ClearingHub 정산 구현 계획서 — 상계·대사·예치금 결제
 
 - 작성일: 2026-11-06
-- 상태: 초안. [PROJECT_PLAN.md](PROJECT_PLAN.md) 3.3절("정산은 표시만")과 [SPEC.md](SPEC.md) 8절 8번("정산 시각·방식, 미구현")을 이 문서로 대체한다
+- 상태: **1~7단계 완료** (2026-11-06), 8단계(부인방지, 12절) 남음. [PROJECT_PLAN.md](PROJECT_PLAN.md) 3.3절("정산은 표시만")과 [SPEC.md](SPEC.md) 8절 8번("정산 시각·방식, 미구현")을 이 문서로 대체한다
 - 범위: 실제 금융망의 이체 13단계 가운데 허브에 아직 없는 **8~13단계**(마감 상계 → 대사 → 중앙은행 정산 → 은행 장부 정리)를 ClearingHub와 AvengersBank에 구현한다(1~7단계). 이어서 **부인방지**(공개키 요청·응답 서명, 12절)를 8단계로 더한다
 - 전제: 서버는 하나(ClearingHub)지만 **장부는 둘**로 분리한다. 거래 기록(`transfers`)과 예치금 원장(`reserve_*`)은 서로 다른 도메인이 관리하고, 둘 사이는 "정산 지시서"로만 이어진다. 나중에 예치금 원장을 별도 서버(중앙은행 역할)로 떼어 내도 허브 쪽 코드는 그대로 두는 것이 목표다
 
@@ -50,8 +50,8 @@
 | 11 | 결제 지시 | `settlement/service.py: confirm()` → `reserve.service.apply_instruction(run_id, instruction_for(run))`, 일일 배치 `workers/settlement.py` | 완료 (4단계) |
 | 12 | 중앙은행 원장 반영 | `reserve/service.py: apply_instruction()` — `reserve_accounts.balance` 갱신 + `reserve_ledger` 분개, 결과를 `settlement_positions.result`·`balance_after`에 (한 트랜잭션) | 완료 (4단계) |
 | 13 | 은행 장부 정리 | AvengersBank `interbank/settlement_sync.py: sync_settlements()`·`reconcile_run()` — run 단위 대사 → `SETTLE` 분개(정산 계정 → `HUB_RESERVE`), 워커 `settlement_sync_loop()` | 완료 (6단계) |
-| (사전) | 당좌예금 예치, 순채무한도 | `reserve` 도메인, `banks.net_debit_cap`, `transfers.service.accept_and_deliver()` 검사 | 이 계획 |
-| (신뢰) | 전자서명·부인방지 | `core/signing.py` Ed25519, 응답 서명, `transfer_evidence` (12절, 8단계) | 이 계획 |
+| (사전) | 당좌예금 예치, 순채무한도 | `reserve` 도메인, `banks.net_debit_cap`, `transfers.service.accept_and_deliver()` 검사(`transfers/exposure.py`) | 완료 (1·2단계) |
+| (신뢰) | 전자서명·부인방지 | `core/signing.py` Ed25519, 응답 서명, `transfer_evidence` (12절, 8단계) | 예정 (8단계) |
 
 ---
 
@@ -282,14 +282,14 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 
 | 단계 | 소요 | 산출물 | 완료 기준 |
 |---|---|---|---|
-| 0. 규격·설정 | 0.5일 | SPEC v0.6 초안(6.3), `config.py`에 `settlement_cutoff_time`(기본 `00:05`), `settlement_timezone`(`Asia/Seoul`), `settlement_auto_confirm`(기본 `false`) | 팀 합의 |
-| 1. 예치금 원장 | 2일 | `domains/reserve/` (models·schemas·service·router), Alembic `reserve_accounts`·`reserve_ledger`·`banks.net_debit_cap`, 관리자 입출금·정정 API, `GET /v1/reserve` | 입금·인출·정정이 분개와 잔액에 같이 남고, 인출 한도 검사가 된다 |
-| 2. 순채무한도 검사 | 1일 | `transfers/service.py` 4.4 검사, 은행 등록 시 `reserve_accounts` 행 자동 생성 | 예치금 0·한도 0인 은행의 이체가 `LIMIT_EXCEEDED FAILED`로 거절되고, 예치금을 넣으면 된다. 기존 테스트는 conftest에서 한도를 넉넉히 줘 그대로 통과 |
+| 0. 규격·설정 **완료** | 0.5일 | SPEC v0.6 초안(6.3), `config.py`에 `settlement_cutoff_time`(기본 `00:05`), `settlement_timezone`(`Asia/Seoul`), `settlement_auto_confirm`(기본 `false`) | 팀 합의 |
+| 1. 예치금 원장 **완료** | 2일 | `domains/reserve/` (models·schemas·service·router), Alembic `reserve_accounts`·`reserve_ledger`·`banks.net_debit_cap`, 관리자 입출금·정정 API, `GET /v1/reserve` | 입금·인출·정정이 분개와 잔액에 같이 남고, 인출 한도 검사가 된다 |
+| 2. 순채무한도 검사 **완료** | 1일 | `transfers/service.py` 4.4 검사, 은행 등록 시 `reserve_accounts` 행 자동 생성 | 예치금 0·한도 0인 은행의 이체가 `LIMIT_EXCEEDED FAILED`로 거절되고, 예치금을 넣으면 된다. 기존 테스트는 conftest에서 한도를 넉넉히 줘 그대로 통과 |
 | 3. 정산 배치 (DRAFT) **완료** | 2일 | `domains/settlement/` models·service(`create_draft`·`cancel_draft`·`instruction_for`), Alembic `settlement_*`·`transfers.settlement_run_id`·`reserve_ledger.run_id` FK, `POST /admin/settlements/run`, 취소, 조회 API, CSV, `exposure`의 미정산 조건, `_set_status` 방어 | 손으로 계산한 하루치 상계와 같다. `Σ net = 0`. DRAFT가 있는데 또 돌리면 409, 취소하면 다시 돌릴 수 있다. 늦게 COMPLETED된 거래가 다음 정산에 들어간다 |
 | 4. 확정·예치금 반영 **완료** | 1.5일 | `confirm()` → `reserve.apply_instruction()`, `workers/settlement.py`(매일 자동 DRAFT, 설정 시 자동 확정, 시작 때 catch-up, 0건 run 자동 확정, `SETTLEMENT_WORKER_ENABLED`), `OVERDRAWN`·`OVERDUE` 처리, `POST /admin/settlements/{run_id}/confirm` | 확정 뒤 잔액이 포지션만큼 바뀌고 분개가 남는다. 두 번 확정 불가. `OVERDUE` 은행은 송금이 막히고 받기는 된다 |
 | 5. 은행용 대사 API **완료** | 1일 | `GET /v1/settlements`, `/v1/settlements/{run_id}` (`service.list_for_bank`·`bank_view`), SPEC v0.6 10절 | 은행이 자기 거래만 본다. 다른 은행 포지션은 안 보인다 (S8, `tests/test_settlement_bank_api.py`) |
 | 6. AvengersBank 대사·정리 **완료** | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `interbank_ledger.hub_run_id`, `settlement_reconciliations`, `settlement_sync.py`·`settlement_sync_loop()` 워커, `hub_client.settlements()`·`settlement(run_id)`, `reconcile()`의 SETTLE·예치금 기대값. 관리자 조회 API는 AvengersBank에 관리자 인증이 없어 만들지 않음 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록에 우리에게 없는 거래가 있으면 `MISMATCH`와 diff가 나온다 (`tests/test_settlement_sync.py`) |
-| 7. 시연·문서 | 1일 | README·DEPLOY 갱신, 시연 대본(8절), 가짜 은행 `902` 예치금 시드 | 8절 시나리오가 끝까지 돈다 |
+| 7. 시연·문서 **완료** | 1일 | [DEMO.md](DEMO.md)(9절 대본, curl과 기대 숫자), `tests/test_demo_scenario.py`(9절 1~8을 허브 API로 끝까지), 가짜 은행 `…0006`(입금 없이 `200 COMPLETED`), DEPLOY "정산 배포 순서"(마이그레이션 → 재시작 → 은행마다 예치금·한도 → `/admin/reserve` 확인 → 개시 정산, `SETTLEMENT_*`), `902` 예치금은 시드 스크립트 대신 관리자 curl, PROJECT_PLAN·README·SPEC v0.6.1 | 9절 시나리오가 끝까지 돈다 (`uv run pytest tests/test_demo_scenario.py`) |
 | 8. 부인방지 | 3일 | 12절 전체: Ed25519 요청·응답 서명, 키 등록·회전, 전환 기간, 증거 보관, SPEC v1.0 | 허브가 은행 서명을 만들 수 없고, 받은 응답으로 상대의 "답한 사실"을 증명할 수 있다 |
 
 8단계는 돈의 흐름(1~7단계, 실제 금융망의 13단계)이 아니라 **신뢰 장치**다. 1~7과 독립이라 2단계 뒤 언제든 할 수 있지만, 규격이 깨지는 변경이라 다른 팀과 날짜를 맞춰야 한다 (12절).
@@ -340,14 +340,16 @@ AvengersBank `tests/test_settlement_sync.py`:
 
 ## 9. 시연 시나리오
 
-1. **예치**: 관리자가 `901`(AvengersBank)에 100만 원, `902`(SimBank)에 100만 원 예치. `/admin/reserve`에서 잔액 확인
-2. **한도 검사**: `903`(예치 0)을 등록해 이체 → `LIMIT_EXCEEDED` "순채무한도를 넘었습니다". 예치 뒤 성공
-3. **하루치 거래**: 모아에게 "SimBank 110-123-0001로 5만 원" 2번, 관리자가 `902`에서 `901`로 3만 원 1번 (가짜 은행은 보내지 못하므로 허브 API로 직접)
-4. **마감 상계**: `POST /admin/settlements/run` → 포지션 표: 901 −7만, 902 +7만. 쌍별 표. CSV
-5. **대사**: AvengersBank 관리 API에서 `settlement_reconciliations` 조회 → `MATCHED`
-6. **확정**: `confirm` → `/admin/reserve`에서 901 93만, 902 107만. 분개 2건
-7. **은행 장부 정리**: AvengersBank 워커 실행 → `INTERBANK_SETTLEMENT` 0, `HUB_RESERVE` −7만 (허브 예치금이 그만큼 줄었음)
-8. **속이는 은행**: 허브 DB에서 거래 하나를 지우고(또는 가짜 은행이 입금 없이 200을 주는 계좌 `0006`을 추가해) 다시 대사 → `MISMATCH`와 문제 `transfer_id`가 나온다. "데이터로만 주고받는데 어떻게 아느냐"에 대한 답이 이 화면이다
+대본(명령·기대 응답)은 [DEMO.md](DEMO.md), 같은 순서를 허브 API로 돌려 숫자를 고정한 테스트는 `tests/test_demo_scenario.py`. 숫자는 모든 은행이 예치금 0에서 시작한 경우다.
+
+1. **예치**: 관리자가 `901`(AvengersBank)·`902`(SimBank)에 각 100만 원 (`POST /admin/reserve/{code}/deposit`). `/admin/reserve`: 둘 다 잔액 100만, 순채무 0, `available` 100만
+2. **한도 검사**: 시연용 `990`(DemoBank, 예치 0·한도 0)을 등록해 902로 1만 원 → `400 LIMIT_EXCEEDED` "순채무한도를 넘었습니다 (예치금 0원 …)", `status: FAILED`, 받는 은행까지 가지 않음. 5만 예치 뒤 같은 이체는 `COMPLETED` (`available` 4만). 운영에서 `903`부터는 다른 팀 몫이라 `990`을 쓴다
+3. **하루치 거래**: 모아에게 "SimBank 110-123-0001로 5만 원" 2번, 관리자가 902 키로 `902 → 901` 3만 원 1번 (가짜 은행은 보내지 못하므로 허브 API로 직접). 순채무: 901 +7만(`available` 93만), 902 −8만(108만), 990 +1만
+4. **마감 상계**: `POST /admin/settlements/run`(오늘) → DRAFT, 4건 14만. 포지션: 901 **−7만**, 902 **+8만**, 990 **−1만** (합 0). 쌍별 표 `901–902` 7만 `a_to_b`, `902–990` 1만 `b_to_a`. CSV 4행
+5. **대사**: 901의 대사 파일(`GET /v1/settlements/{run_id}`)은 SENT 5만 2건·RECEIVED 3만 1건, net −7만 (990 거래는 안 보인다). DRAFT로는 순채무가 그대로. AvengersBank는 `settlement_reconciliations`에 `MATCHED` (`avengers_bank/tests/test_settlement_sync.py` B1이 같은 하루치로 증명)
+6. **확정**: `confirm` → `/admin/reserve` 901 **93만**, 902 **108만**, 990 **4만**, 순채무 0, `available`은 확정 전과 같다. 분개 3건 (`SETTLE_DEBIT −7만`, `SETTLE_CREDIT +8만`, `SETTLE_DEBIT −1만`)
+7. **은행 장부 정리**: AvengersBank 워커(`settlement_sync_loop`)가 SETTLED run을 보고 `INTERBANK_SETTLEMENT:902` +7만 → 0, `HUB_RESERVE` −7만 (B1·B4)
+8. **속이는 은행**: 모아에게 "SimBank 110-123-**0006**으로 2만 원" → 가짜 은행이 입금 없이 `200 COMPLETED` → 허브 `COMPLETED`, 가짜 은행 장부(`received`)에는 없고 `GET /interbank/receive/{id}`는 404 → 새 run(901 −2만, 902 +2만)의 902 대사 파일에 그 거래가 `RECEIVED`로 있다 = 902가 대사하면 `hub_only` → `MISMATCH`. "데이터로만 주고받는데 어떻게 아느냐"에 대한 답이 이 화면이다. 가짜 은행은 장부가 없어 스스로 대사하지 않으므로, AvengersBank 화면에서 `MISMATCH`를 보이려면 반대 방향(허브에만 있는 AvengersBank 입금)을 시연 DB에서 만든다 (DEMO.md 8)
 
 ---
 

@@ -6,13 +6,15 @@
 |---|---|
 | [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) | 계획서: 배경, 구조, 데이터 모델, 일정, 리스크 |
 | [docs/SPEC.md](docs/SPEC.md) | **참가 은행 연동 규격** (다른 팀에 전달하는 문서) |
-| [docs/DEPLOY.md](docs/DEPLOY.md) | AWS 배포: 처음 한 번 할 일, 가짜 은행 연결, 서버 `.env` |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | AWS 배포: 처음 한 번 할 일, 가짜 은행 연결, 서버 `.env`, 정산 배포 순서(예치금) |
+| [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md) | 정산 계획서: 예치금 원장, 순채무한도, 마감 상계, 대사, 확정, 부인방지(12절) |
+| [docs/DEMO.md](docs/DEMO.md) | 시연 대본: 예치 → 한도 → 하루치 → 상계 → 대사 → 확정 → 속이는 은행 (curl과 기대 숫자) |
 
 ## 구조
 
 ```
 src/clearing_hub/
-├── main.py                 앱, 재시도 태스크 시작
+├── main.py                 앱, 재시도·정산 태스크 시작
 ├── core/
 │   ├── signing.py          HMAC 서명 만들기·검증 (SPEC 2)
 │   ├── auth.py             은행 인증(서명), 관리자 토큰
@@ -28,8 +30,9 @@ src/clearing_hub/
 └── workers/
     ├── retry.py            미확인(PENDING) 거래 확인 태스크
     └── settlement.py       일일 정산 배치 (매일 00:05 KST 어제 정산 DRAFT, 설정 시 자동 확정, 시작 때 놓친 배치 catch-up)
-src/bank_sim/main.py        가짜 은행 (SPEC 4·9.4절 참고 구현, 계좌번호 끝자리로 성공·실패·지연 재현)
-tests/                      서명, 인증, 이체 성공·실패·멱등·타임아웃·재시도
+src/bank_sim/main.py        가짜 은행 (SPEC 4·9.4절 참고 구현, 계좌번호 끝자리로 성공·실패·지연·속임 재현)
+tests/                      서명, 인증, 이체 성공·실패·멱등·타임아웃·재시도, 예치금·순채무한도·정산·대사 API,
+                            시연 시나리오 전체 (test_demo_scenario.py = docs/DEMO.md)
 ```
 
 이체 상태: `ACCEPTED → DELIVERING → COMPLETED / FAILED / PENDING → (재시도) → COMPLETED / FAILED / UNKNOWN`
@@ -71,8 +74,10 @@ API 문서: http://127.0.0.1:8000/docs
    SIM_HUB_SECRET=<secret> uv run uvicorn bank_sim.main:app --port 8100
    ```
 3. 보내는 은행(예: AvengersBank, `901`)도 같은 방법으로 등록하고, 그 키로 서명해서 `/v1/transfers`를 부른다. 서명 방법과 예시는 [SPEC.md](docs/SPEC.md) 2절.
+   등록 직후에는 예치금·순채무한도가 0이라 송금이 `LIMIT_EXCEEDED`로 거절된다. 먼저 예치금을 넣는다 (`POST /admin/reserve/901/deposit {"amount":1000000}`, [docs/DEMO.md](docs/DEMO.md) 1).
+4. 정산까지 이어서 보려면 [docs/DEMO.md](docs/DEMO.md)의 순서대로 한다.
 
-가짜 은행의 계좌번호 끝 4자리: `0001` 정상 · `0002` 계좌 없음 · `0003` 지연(타임아웃) · `0004` 500 두 번 뒤 성공 · `0005` 입금됐는데 응답 없음.
+가짜 은행의 계좌번호 끝 4자리: `0001` 정상 · `0002` 계좌 없음 · `0003` 지연(타임아웃) · `0004` 500 두 번 뒤 성공 · `0005` 입금됐는데 응답 없음 · `0006` 입금하지 않고 `200 COMPLETED` (대사 시연용. 허브는 이 거래를 `COMPLETED`로 기록하지만 가짜 은행 장부에는 없다).
 
 본인 계좌 조회(SPEC 9절): 가짜 은행은 `김철수 / 19850315 / 01098765432`의 가상 CI(`SIM_CI_KEY`, 기본 `example-ci-key-change-me`)에 계좌 2개, `홍길동 / 19900101 / 01000000000`(AvengersBank 시연 고객)에 1개를 돌려준다.
 
@@ -103,6 +108,5 @@ docker logs clearing-hub 2>&1 | grep <request_id>
 ## 다음 단계
 
 - 관리자 JWT 로그인 (지금은 `ADMIN_TOKEN` 헤더), `hmac_secret` 암호화 저장
-- 정산(마감 상계 → 대사 → 예치금 결제): [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md). 1단계 예치금 원장(`reserve/`), 2단계 순채무한도(접수 때 `LIMIT_EXCEEDED`, `transfers/exposure.py`), 3단계 정산 DRAFT(수집·상계, `settlement/`), 4단계 확정·예치금 반영(`POST /admin/settlements/{run_id}/confirm`)·일일 워커(`workers/settlement.py`), 5단계 은행용 대사 API(`GET /v1/settlements`, `/v1/settlements/{run_id}`)·SPEC v0.6(10절 정산)까지 구현
+- 정산(마감 상계 → 대사 → 예치금 결제): [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md) 1~7단계 완료 — 예치금 원장(`reserve/`), 순채무한도(접수 때 `LIMIT_EXCEEDED`, `transfers/exposure.py`), 정산 DRAFT·확정·일일 워커(`settlement/`, `workers/settlement.py`), 은행용 대사 API(SPEC 10절), AvengersBank 대사·장부 정리, 시연([docs/DEMO.md](docs/DEMO.md)). 다음은 **부인방지**(Ed25519 요청·응답 서명, 계획서 12절, SPEC v1.0)
 - 관리 사이트(React)
-- AvengersBank에 허브 클라이언트와 `/interbank/*` 추가

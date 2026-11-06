@@ -22,6 +22,7 @@ AvengersBank와 같은 공용 배포 서버에 올린다. 환경 구성·설계 
 | `.github/workflows/deploy.yml` | TIL `templates/deploy.yml` 기반. 브랜치 `main`, 빌드 전에 `pytest` |
 | `deploy/server-setup.sh` | 서버 최초 1회: compose, DB role·database, `.env`·`sim.env`(비밀값을 서버 안에서 생성) |
 | `alembic/versions/ef6bf3b35409_init.py` | 초기 테이블 (`banks`, `transfers`, `transfer_events`) |
+| `alembic/versions/c7e1a9d4f2b6_reserve_ledger.py`, `d8f2b3a6e1c9_settlement_runs.py` | 정산: 예치금 원장(`reserve_accounts`·`reserve_ledger`·`banks.net_debit_cap`), 정산 run(`settlement_*`·`transfers.settlement_run_id`) |
 
 ## 처음 한 번
 
@@ -119,6 +120,32 @@ curl -s -X PATCH https://clearing-hub.ai-agent-develop.cloud/admin/banks/903 \
 curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping -H "X-Admin-Token: $TOKEN"
 ```
 
+## 정산 배포 순서 (예치금·순채무한도)
+
+정산([SETTLEMENT_PLAN.md](SETTLEMENT_PLAN.md) 1~7단계)이 들어간 커밋을 처음 배포하면 **모든 참가 은행의 송금이 `LIMIT_EXCEEDED`로 막힌다.** 예치금과 순채무한도가 둘 다 0에서 시작하기 때문이다 (받기는 된다, SPEC 10.2). 은행 쪽은 고칠 것이 없고, 허브 관리자가 아래 순서로 한다.
+
+1. **마이그레이션** `alembic upgrade head`: 컨테이너가 시작할 때 자동으로 돈다 (`c7e1a9d4f2b6` → `d8f2b3a6e1c9`). 확인:
+   ```bash
+   docker exec clearing-hub alembic current
+   ```
+2. **서버 재시작**: `main` push → Actions → `deploy-app`이 새 이미지로 두 컨테이너를 다시 만든다. 정산 워커(`SETTLEMENT_WORKER_ENABLED`, 기본 켜짐)도 함께 뜬다
+3. **관리자가 참가 은행마다 예치금 또는 한도를 넣는다.** 안 넣으면 그 은행의 송금이 전부 `LIMIT_EXCEEDED`("순채무한도를 넘었습니다")다. 배포 전 거래는 모두 미정산이라 순채무(`exposure`)에 이미 잡혀 있으므로, 먼저 `/admin/reserve`의 `exposure`를 보고 그보다 넉넉히 넣는다
+   ```bash
+   curl -s https://clearing-hub.ai-agent-develop.cloud/admin/reserve -H "X-Admin-Token: $TOKEN"
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/reserve/901/deposit      -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"amount":1000000,"memo":"개시 예치"}'
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/reserve/902/deposit      -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"amount":1000000,"memo":"개시 예치 (가짜 은행)"}'
+   ```
+   예치금 대신(또는 함께) 순채무한도를 줄 수도 있다: `PATCH /admin/banks/{code}` `{"net_debit_cap": 500000}`. 가짜 은행 `902`는 받기만 하지만, 시연에서 관리자가 902 키로 `902 → 901` 이체를 만들므로(DEMO.md 3) 예치금이 필요하다
+4. **`/admin/reserve`로 확인**: 은행마다 `available`(= `balance + net_debit_cap − exposure`)이 0보다 커야 송금이 된다
+5. **(권장) 개시 정산**: 배포 전 거래가 첫 run에 모두 들어간다. 시연 숫자를 깨끗하게 하려면 오늘 날짜로 run을 만들고 바로 확정해 둔다. 확정하면 그 차액만큼 예치금이 옮겨지므로 3을 먼저 한다
+   ```bash
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/settlements/run      -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d "{\"settle_date\":\"$(TZ=Asia/Seoul date +%F)\"}"
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/settlements/<run_id>/confirm      -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"reason":"개시 정산"}'
+   ```
+   AvengersBank가 그 거래들의 내부 분개(`interbank_ledger`)를 갖고 있지 않으면 이 run은 AvengersBank 쪽에서 `MISMATCH`(`hub_only`)로 남는다. 그 run만 그렇고 이체와 다음 run의 대사는 계속된다
+
+배포 뒤에는 워커가 매일 00:05(KST) 어제 정산일의 DRAFT를 만든다. 자동 확정(`SETTLEMENT_AUTO_CONFIRM`)이 꺼져 있으면 관리자가 확정한다(`POST /admin/settlements/{run_id}/confirm`). **DRAFT를 확정하지 않고 두면 다음 날 배치는 경고만 남기고 건너뛴다** (거래는 미정산으로 남아 다음 run에 들어가고, 그동안 순채무에서도 빠지지 않는다).
+
 ## UNKNOWN 거래 정리
 
 재시도를 다 해도 결과를 모르는 거래는 `UNKNOWN`으로 남고, 허브는 더 이상 자동으로 확인하지 않는다. 찾기:
@@ -149,6 +176,10 @@ curl -s https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id
 | | `ADMIN_TOKEN` | 생성 (hex 64자). 관리 API(`/admin/*`) 헤더 `X-Admin-Token` |
 | | `RECEIVER_TIMEOUT_SECONDS`, `RETRY_INTERVAL_SECONDS`, `RETRY_MAX_COUNT`, `MAX_TRANSFER_AMOUNT` | `.env.example`과 같은 기본값 |
 | | `CI_KEY` | 가상 CI 키 (SPEC 9.1, hex 64자). **허브 앱은 쓰지 않는다**. 원본 보관용이며 참가 은행들에 나눠 주는 값 |
+| | `SETTLEMENT_WORKER_ENABLED` | `true`(기본): 일일 정산 배치 태스크를 띄운다. `false`면 관리자가 `POST /admin/settlements/run`으로만 |
+| | `SETTLEMENT_CUTOFF_TIME` | `00:05`(기본, `HH:MM`). 매일 이 시각에 어제 정산일의 DRAFT를 만든다 |
+| | `SETTLEMENT_TIMEZONE` | `Asia/Seoul`(기본). 정산일·마감 시각의 기준 |
+| | `SETTLEMENT_AUTO_CONFIRM` | `false`(기본): 관리자가 대사 뒤 확정. `true`면 배치가 DRAFT를 바로 확정한다 (시연용) |
 | `sim.env` | `SIM_HUB_SECRET` | 902 등록 때 받은 secret |
 | | `SIM_DELAY_SECONDS` | `8` (허브 타임아웃 5초보다 길어야 지연 시나리오가 재현된다) |
 | | `SIM_CI_KEY` | `.env`의 `CI_KEY`와 같은 값. 비어 있으면 예시 키 `example-ci-key-change-me`를 써서, 실제 키로 만든 `ci`로는 가짜 은행 계좌가 나오지 않는다 |

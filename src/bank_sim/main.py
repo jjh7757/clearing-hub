@@ -2,6 +2,7 @@
 
 계좌번호 끝 4자리로 동작을 고른다 (PROJECT_PLAN 3.5).
   0001 정상 입금 · 0002 계좌 없음 · 0003 지연(허브 타임아웃) · 0004 500 두 번 뒤 성공 · 0005 입금은 됐는데 응답 안 함
+  0006 입금하지 않고 200 COMPLETED (속이는 은행, 대사 시연용. SETTLEMENT_PLAN 9절 8)
 그 밖의 번호는 정상 입금. 저장은 메모리(재시작하면 사라짐).
 
 본인 계좌 조회(SPEC 9.4): 김철수 / 19850315 / 010-9876-5432 → 계좌 2개, 홍길동 / 19900101 / 010-0000-0000 → 1개
@@ -122,6 +123,9 @@ async def receive(data: ReceiveRequest):
             if left > 0:
                 server_errors_left[tid] = left - 1
                 return _error(500, "INTERNAL_ERROR", "일시 장애", tid)
+        case "0006":  # 입금도 기록도 하지 않고 완료라고 답한다. 허브는 COMPLETED로 기록하지만 이 은행 장부(received)에는 없다
+            logger.warning("0006: 입금하지 않고 COMPLETED로 답함 (대사 시연용)", extra={"transfer_id": tid})
+            return {"transfer_id": tid, "status": "COMPLETED", "holder_name": holder_of(data.to_account)}
     received[tid] = {**data.model_dump(), "received_at": datetime.now(UTC).isoformat(timespec="seconds")}
     if _behavior(data.to_account) == "0005":  # 입금은 됐는데 응답이 늦음 → 허브는 결과 조회로만 알 수 있다
         await _delay()

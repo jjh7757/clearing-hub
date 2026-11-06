@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, func
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from clearing_hub.core.database import Base
@@ -56,4 +56,33 @@ class TransferEvent(Base):
     from_status: Mapped[str | None] = mapped_column(String(20))
     to_status: Mapped[str] = mapped_column(String(20), nullable=False)
     detail: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class EvidenceDirection(StrEnum):
+    REQUEST_IN = "REQUEST_IN"  # 은행 → 허브 이체 접수 요청 (POST /v1/transfers)
+    RECEIVE_OUT = "RECEIVE_OUT"  # 허브 → 받는 은행 요청 (POST /receive, GET /receive/{id})
+    RECEIVE_REPLY = "RECEIVE_REPLY"  # 받는 은행의 응답
+
+
+class TransferEvidence(Base):
+    """분쟁 때 꺼내 보일 원문 (SETTLEMENT_PLAN 12.2 9번·12.3). 고치거나 지우지 않는다 (추가만 한다).
+
+    서명은 원본 바이트에 대한 것이라 body는 받은·보낸 바이트 그대로 둔다. headers_json에는 서명 검증에 필요한 헤더만
+    넣는다 (X-Api-Key는 넣지 않는다). 다시 검증하려면 method·path(요청)나 http_status와 짝 요청의 X-Signature(응답)가
+    필요하므로 칸을 따로 둔다."""
+
+    __tablename__ = "transfer_evidence"
+
+    evidence_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    transfer_id: Mapped[str] = mapped_column(ForeignKey("transfers.transfer_id"), index=True, nullable=False)
+    direction: Mapped[str] = mapped_column(String(20), nullable=False)
+    method: Mapped[str | None] = mapped_column(String(10))  # 요청만
+    path: Mapped[str | None] = mapped_column(String(200))  # 서명에 쓴 규격 경로 (요청만)
+    http_status: Mapped[int | None] = mapped_column(Integer)  # 응답만
+    headers_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    body: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    signature_alg: Mapped[str | None] = mapped_column(String(10))  # hmac | ed25519 | None(서명 없음)
+    # 받을 때 검증 결과. 허브가 보낸 요청(RECEIVE_OUT)은 허브가 서명했으므로 None. 응답 서명이 없고 요구하지도 않으면 None
+    signature_valid: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

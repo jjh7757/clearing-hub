@@ -23,6 +23,7 @@ AvengersBank와 같은 공용 배포 서버에 올린다. 환경 구성·설계 
 | `deploy/server-setup.sh` | 서버 최초 1회: compose, DB role·database, `.env`·`sim.env`(비밀값을 서버 안에서 생성) |
 | `alembic/versions/ef6bf3b35409_init.py` | 초기 테이블 (`banks`, `transfers`, `transfer_events`) |
 | `alembic/versions/c7e1a9d4f2b6_reserve_ledger.py`, `d8f2b3a6e1c9_settlement_runs.py` | 정산: 예치금 원장(`reserve_accounts`·`reserve_ledger`·`banks.net_debit_cap`), 정산 run(`settlement_*`·`transfers.settlement_run_id`) |
+| `alembic/versions/e5a1c7f3d9b2_nonrepudiation.py` | 부인방지: `banks.signature_mode`(기본 `hmac`)·공개키 칸, `transfer_evidence` |
 
 ## 처음 한 번
 
@@ -146,6 +147,53 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping
 
 배포 뒤에는 워커가 매일 00:05(KST) 어제 정산일의 DRAFT를 만든다. 자동 확정(`SETTLEMENT_AUTO_CONFIRM`)이 꺼져 있으면 관리자가 확정한다(`POST /admin/settlements/{run_id}/confirm`). **DRAFT를 확정하지 않고 두면 다음 날 배치는 경고만 남기고 건너뛴다** (거래는 미정산으로 남아 다음 run에 들어가고, 그동안 순채무에서도 빠지지 않는다).
 
+## 부인방지 배포·전환 순서 (8단계, SPEC 2.6)
+
+이 커밋을 배포해도 **은행 쪽 동작은 바뀌지 않는다.** 모든 은행이 `hmac` 모드로 시작하고(마이그레이션 `e5a1c7f3d9b2`의 기본값), 허브 → 은행 요청에 `X-Signature-Alg: hmac` 헤더가 하나 더 붙을 뿐이다 (모르는 헤더는 무시, SPEC 1절).
+
+1. **마이그레이션**: 컨테이너가 시작할 때 자동 (`d8f2b3a6e1c9` → `e5a1c7f3d9b2`)
+2. **허브 키 만들기** (Session Manager, 서버 안에서. 개인키를 화면·채팅에 내지 않는다):
+   ```bash
+   KEYS=$(docker exec clearing-hub python -c "from clearing_hub.core.signing import generate_keypair; print(*generate_keypair())")
+   echo "HUB_SIGNING_KEY=${KEYS%% *}" | sudo tee -a /srv/clearing-hub/.env >/dev/null
+   unset KEYS
+   sudo /usr/local/bin/deploy-app clearing-hub "$(docker inspect -f '{{.Config.Image}}' clearing-hub | cut -d: -f2)"
+   ```
+   로컬에서는 `uv run python -c "from clearing_hub.core.signing import generate_keypair; print(generate_keypair())"`로 만들어 `.env`에 넣는다 (앞이 개인키, 뒤가 공개키).
+   키가 없으면 허브는 Ed25519로 **보내지도**(`ed25519` 전환이 400 `HUB_KEY_MISSING`) 응답에 서명하지도 못한다. 받는 것(`both`)은 된다. 형식이 틀린 키는 서버가 시작하지 않는다
+3. **확인·지문 전달**:
+   ```bash
+   curl -s https://clearing-hub.ai-agent-develop.cloud/v1/hub-key
+   ```
+   응답의 `fingerprint`를 secret처럼 **은행 팀마다 개별 경로로** 알려 준다. 은행은 이 API로 받은 공개키를 그 지문과 맞춰 본다 (응답만 믿으면 바꿔치기한 키를 받을 수 있다). 허브 키를 바꾸면 모든 `ed25519` 은행이 새 공개키를 받아야 하므로, 유출이 아니면 바꾸지 않는다
+4. **은행별 전환** (은행이 요청할 때마다): 은행이 받는 쪽(허브 공개키 검증, 응답 서명)을 준비하고 `PUT /v1/keys`로 공개키를 등록한 뒤(또는 공개키를 받아 관리자가 등록) 요청하면 올린다
+   ```bash
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/public-key      -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"public_key":"<은행이 준 공개키>"}'
+   curl -s -X PATCH https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/signature-mode      -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"signature_mode":"both"}'
+   # 은행이 보내는 쪽까지 Ed25519로 바꿨다고 하면
+   curl -s -X PATCH https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/signature-mode      -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"signature_mode":"ed25519"}'
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping -H "X-Admin-Token: $TOKEN"
+   ```
+   ping에서 `status`가 200·404이고 `response_signature_valid`가 `true`여야 한다. `false`면 그 은행으로 가는 이체가 모두 `PENDING`이 되므로 바로 `both`로 내리고 은행에 알린다 (내리는 것은 언제든 된다). 관리자 은행 목록(`GET /admin/banks`)에 `signature_mode`·`public_key_fingerprint`가 나온다
+5. **가짜 은행 `902`를 Ed25519로** (시연용): 가짜 은행 키 쌍을 서버 안에서 만들어 개인키는 `sim.env`의 `SIM_SIGNING_KEY`, 공개키는 902에 등록하고, `SIM_HUB_PUBLIC_KEY`에 3의 `public_key`를 넣는다. 순서는 위와 같다: `SIM_SIGNATURE_MODE=both`로 다시 만든다 → 허브 `ed25519` 전환 → `SIM_SIGNATURE_MODE=ed25519`로 다시 만든다 → ping
+   ```bash
+   KEYS=$(docker exec clearing-hub python -c "from clearing_hub.core.signing import generate_keypair; print(*generate_keypair())")
+   printf 'SIM_SIGNING_KEY=%s\nSIM_HUB_PUBLIC_KEY=%s\nSIM_SIGNATURE_MODE=both\n' "${KEYS%% *}" \
+     "$(curl -s https://clearing-hub.ai-agent-develop.cloud/v1/hub-key | python3 -c 'import json,sys; print(json.load(sys.stdin)["public_key"])')" \
+     | sudo tee -a /srv/clearing-hub/sim.env >/dev/null
+   curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/902/public-key \
+     -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d "{\"public_key\":\"${KEYS##* }\"}"
+   unset KEYS
+   ```
+   그다음 컨테이너를 다시 만들고(`deploy-app`), `signature-mode` `ed25519` → `sim.env`의 `SIM_SIGNATURE_MODE=ed25519`로 고쳐 다시 만든 뒤 ping
+6. **분쟁 조회**: 거래 하나의 접수 요청·`/receive` 요청·응답 원문과 서명 검증 결과
+   ```bash
+   curl -s https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id>/evidence -H "X-Admin-Token: $TOKEN"
+   ```
+   `body`는 서명한 바이트 그대로(UTF-8 문자열, 아니면 `body_encoding: base64`)라 그 자리에서 다시 검증할 수 있다. 이 표는 고치거나 지우지 않는다
+
+HMAC secret 재발급(`POST /admin/banks/{code}/keys`)은 공개키와 모드를 바꾸지 않는다. 은행의 개인키가 유출되면 은행이 `PUT /v1/keys`로 회전하고(옛 키는 24시간 받는다), 급하면 관리자가 먼저 `hmac`으로 내린다.
+
 ## UNKNOWN 거래 정리
 
 재시도를 다 해도 결과를 모르는 거래는 `UNKNOWN`으로 남고, 허브는 더 이상 자동으로 확인하지 않는다. 찾기:
@@ -180,7 +228,12 @@ curl -s https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id
 | | `SETTLEMENT_CUTOFF_TIME` | `00:05`(기본, `HH:MM`). 매일 이 시각에 어제 정산일의 DRAFT를 만든다 |
 | | `SETTLEMENT_TIMEZONE` | `Asia/Seoul`(기본). 정산일·마감 시각의 기준 |
 | | `SETTLEMENT_AUTO_CONFIRM` | `false`(기본): 관리자가 대사 뒤 확정. `true`면 배치가 DRAFT를 바로 확정한다 (시연용) |
-| `sim.env` | `SIM_HUB_SECRET` | 902 등록 때 받은 secret |
+| | `HUB_SIGNING_KEY` | 허브 Ed25519 개인키 (raw 32바이트 base64, 44자). 서버 안에서 생성 ("부인방지 배포·전환 순서" 2). 비어 있으면 Ed25519로 보내지 못하고 응답 서명도 없다 |
+| | `PREVIOUS_KEY_TTL_SECONDS` | `86400`(기본). 은행 공개키 회전 뒤 옛 키를 받아 주는 시간 |
+| `sim.env` | `SIM_HUB_SECRET` | 902 등록 때 받은 secret (HMAC 검증) |
+| | `SIM_SIGNATURE_MODE` | `hmac`(기본) / `both` / `ed25519`. 허브 요청을 어떤 서명으로 받을지. 허브의 902 `signature_mode`와 맞춘다 (`ed25519`면 HMAC 요청을 401로 거절) |
+| | `SIM_HUB_PUBLIC_KEY` | 허브 공개키 (`GET /v1/hub-key`). `X-Signature-Alg: ed25519` 요청 검증. 비어 있으면 Ed25519 검증을 건너뛴다 (`SIM_HUB_SECRET`과 같은 규칙) |
+| | `SIM_SIGNING_KEY` | 가짜 은행 Ed25519 개인키. 있으면 `/interbank/*` 2xx·4xx 응답에 응답 서명. 공개키는 902에 등록한다 |
 | | `SIM_DELAY_SECONDS` | `8` (허브 타임아웃 5초보다 길어야 지연 시나리오가 재현된다) |
 | | `SIM_CI_KEY` | `.env`의 `CI_KEY`와 같은 값. 비어 있으면 예시 키 `example-ci-key-change-me`를 써서, 실제 키로 만든 `ci`로는 가짜 은행 계좌가 나오지 않는다 |
 
@@ -200,7 +253,8 @@ curl -s https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id
 ## 알아 둘 것
 
 - `/admin/*`이 인터넷에 열려 있고 `ADMIN_TOKEN` 하나로만 막는다. 관리자 JWT 로그인은 다음 단계이므로 토큰을 채팅·문서에 붙이지 않는다
-- `hmac_secret`은 아직 평문으로 저장된다 (다음 단계: Fernet 암호화). DB 백업에도 그대로 들어간다
+- `hmac_secret`은 아직 평문으로 저장된다 (다음 단계: Fernet 암호화). DB 백업에도 그대로 들어간다. 은행 Ed25519 공개키는 비밀이 아니다. 허브 개인키(`HUB_SIGNING_KEY`)는 `.env`에만 있다
+- `transfer_evidence`는 이체마다 3~5행이 쌓이고 지우지 않는다 (보관 기간은 아직 정하지 않았다)
 - 마이그레이션은 컨테이너가 시작될 때마다 `alembic upgrade head`로 적용된다. 모델을 바꾸면 리비전을 만들어 함께 커밋한다
 
 ## 로컬 검증 (2026-11-05)

@@ -240,5 +240,5 @@ async def test_admin_token_is_not_bank_auth(client, banks):
 
 
 async def test_root_spec_version(client):
-    """루트 응답의 규격 버전은 docs/SPEC.md와 같다 (v0.6)."""
-    assert (await client.get("/")).json() == {"service": "ClearingHub", "spec": "v0.6.1"}
+    """루트 응답의 규격 버전은 docs/SPEC.md와 같다 (v1.0)."""
+    assert (await client.get("/")).json() == {"service": "ClearingHub", "spec": "v1.0"}

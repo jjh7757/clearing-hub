@@ -10,6 +10,12 @@ os.environ["RETRY_MAX_COUNT"] = "3"
 os.environ["SETTLEMENT_WORKER_ENABLED"] = "false"  # 테스트 DB에 run을 만들지 않게. 워커 함수는 테스트가 직접 부른다
 os.environ["SIM_DELAY_SECONDS"] = "1"  # 허브 타임아웃(0.3초)보다 길게
 
+from clearing_hub.core.signing import generate_keypair, public_key_of, sign, sign_ed25519  # noqa: E402
+
+# 허브 Ed25519 키 (SPEC 2.6). 테스트마다 새로 만든다. 허브 응답 서명·ed25519 모드 은행 호출에 쓴다
+HUB_PRIVATE_KEY, HUB_PUBLIC_KEY = generate_keypair()
+os.environ["HUB_SIGNING_KEY"] = HUB_PRIVATE_KEY
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -17,7 +23,6 @@ import bank_sim.main as sim
 from clearing_hub.core import bank_client as bank_client_module
 from clearing_hub.core.bank_client import BankClient
 from clearing_hub.core.database import Base, engine
-from clearing_hub.core.signing import sign
 from clearing_hub.main import app
 
 ADMIN = {"X-Admin-Token": os.environ["ADMIN_TOKEN"]}
@@ -30,14 +35,29 @@ def anyio_backend():
 
 
 class SignedBank:
-    """테스트에서 참가 은행 역할: 발급받은 키로 서명해 허브를 부른다."""
+    """테스트에서 참가 은행 역할: 발급받은 키로 서명해 허브를 부른다.
+
+    기본은 HMAC (X-Signature-Alg 없이, 기존 은행과 같다). `use_ed25519()` 뒤에는 자기 개인키로 Ed25519 서명한다 (SPEC 2.3)."""
 
     def __init__(self, client: AsyncClient, bank_code: str, api_key: str, secret: str):
         self.client, self.bank_code, self.api_key, self.secret = client, bank_code, api_key, secret
+        self.alg = "hmac"
+        self.private_key, self.public_key = generate_keypair()
+
+    def use_ed25519(self, private_key: str | None = None) -> "SignedBank":
+        if private_key is not None:
+            self.private_key, self.public_key = private_key, public_key_of(private_key)
+        self.alg = "ed25519"
+        return self
 
     def headers(self, method: str, path: str, body: bytes, timestamp: int | None = None) -> dict[str, str]:
-        return {"X-Bank-Code": self.bank_code, "X-Api-Key": self.api_key, "Content-Type": "application/json",
-                **sign(self.secret, method, path, body, timestamp)}
+        signed = (sign_ed25519(self.private_key, method, path, body, timestamp) if self.alg == "ed25519"
+                  else sign(self.secret, method, path, body, timestamp))
+        return {"X-Bank-Code": self.bank_code, "X-Api-Key": self.api_key, "Content-Type": "application/json", **signed}
+
+    async def put(self, path: str, payload: dict):
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+        return await self.client.put(path, content=body, headers=self.headers("PUT", path, body))
 
     async def post(self, path: str, payload: dict, **kw):
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()

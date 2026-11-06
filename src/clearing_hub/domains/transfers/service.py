@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from clearing_hub.core.auth import VerifiedRequest
 from clearing_hub.core.bank_client import BankClient, BankReply, bank_client
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.request_id import get_request_id
@@ -17,6 +18,7 @@ from clearing_hub.domains.accounts import service as account_service
 from clearing_hub.domains.banks import service as bank_service
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.reserve import service as reserve_service
+from clearing_hub.domains.transfers import evidence
 from clearing_hub.domains.transfers.exposure import open_exposure
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
 from clearing_hub.domains.transfers.schemas import TransferRequest, TransferResolve
@@ -63,12 +65,16 @@ def _apply_reply(db: AsyncSession, transfer: Transfer, reply: BankReply, *, no_a
         transfer.fail_code = reply.error
         transfer.fail_message = (reply.message or "받는 은행이 거절했습니다")[:200]
         _set_status(db, transfer, TransferStatus.FAILED, f"{transfer.fail_code}: {transfer.fail_message}")
+    elif reply.signature_valid is False:
+        # ed25519 모드 은행의 응답 서명이 없거나 틀림: 응답 없음과 같이 4.3 확인으로 넘긴다 (SETTLEMENT_PLAN 12.4)
+        _set_status(db, transfer, no_answer_status, "응답 서명 검증 실패 (응답 없음으로 처리)")
     else:
         _set_status(db, transfer, no_answer_status, f"응답 없음 (HTTP {reply.status})")
 
 
 async def accept_and_deliver(
-    db: AsyncSession, sender: Bank, data: TransferRequest, client: BankClient = bank_client
+    db: AsyncSession, sender: Bank, data: TransferRequest, client: BankClient = bank_client,
+    request_evidence: VerifiedRequest | None = None,
 ) -> tuple[Transfer, bool]:
     """이체 접수 → 받는 은행 호출. (transfer, 이미 있던 거래인지)를 돌려준다.
 
@@ -77,6 +83,9 @@ async def accept_and_deliver(
 
     접수 전 검사 순서: 1회 상한 → SAME_BANK → 받는 은행 → account_ref → 순채무한도(_check_net_debit_cap).
     순채무한도 검사는 보내는 은행의 예치금 행을 잠그고 하며, 잠금은 바로 뒤 접수 저장 커밋에서 풀린다.
+
+    request_evidence(서명 검증을 통과한 접수 요청 원문)는 새 거래일 때만 접수와 같은 커밋으로 남긴다 (REQUEST_IN, 12.3).
+    멱등 재전송·접수 전 거절은 거래가 새로 생기지 않으므로 남기지 않는다.
     """
     existing = await db.get(Transfer, data.transfer_id)
     if existing is not None:
@@ -101,12 +110,15 @@ async def accept_and_deliver(
                         request_id=get_request_id())  # 재시도에도 같은 추적 ID를 보낸다 (SPEC 2.4)
     db.add(transfer)
     db.add(TransferEvent(transfer_id=transfer.transfer_id, from_status=None, to_status=TransferStatus.ACCEPTED, detail="접수"))
+    if request_evidence is not None:
+        evidence.record_request_in(db, transfer.transfer_id, request_evidence)
     _set_status(db, transfer, TransferStatus.DELIVERING, f"{receiver.name}에 전달")
     transfer.delivered_at = _now()
     await db.commit()
 
-    # 2) 받는 은행 호출
+    # 2) 받는 은행 호출. 보낸 요청과 받은 응답은 결과와 같은 커밋으로 남긴다 (RECEIVE_OUT·RECEIVE_REPLY)
     reply = await client.receive(receiver, _receive_payload(transfer, sender), transfer.request_id)
+    evidence.record_exchange(db, transfer.transfer_id, reply)
     _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
     await db.commit()
     return transfer, False
@@ -155,14 +167,17 @@ async def _confirm_one(db: AsyncSession, transfer: Transfer, client: BankClient)
     if receiver is None or sender is None:
         return False
     status = await client.receive_status(receiver, transfer.transfer_id, transfer.request_id)
+    evidence.record_exchange(db, transfer.transfer_id, status)  # 4.3 확인의 COMPLETED도 "답한 사실"의 증거다
     if status.ok and status.body.get("status") == "COMPLETED":
         _apply_reply(db, transfer, status, no_answer_status=TransferStatus.PENDING)
     elif status.status == 404:
         # 은행이 그 ID로 입금한 적 없음 → /receive를 다시 보낸다 (은행 쪽 멱등 처리에 기댄다)
         reply = await client.receive(receiver, _receive_payload(transfer, sender), transfer.request_id)
+        evidence.record_exchange(db, transfer.transfer_id, reply)
         _apply_reply(db, transfer, reply, no_answer_status=TransferStatus.PENDING)
     else:
-        _set_status(db, transfer, TransferStatus.PENDING, f"확인 실패 (HTTP {status.status})")
+        reason = "응답 서명 검증 실패" if status.signature_valid is False else f"HTTP {status.status}"
+        _set_status(db, transfer, TransferStatus.PENDING, f"확인 실패 ({reason})")
     logger.info("거래 재확인 %s → %s", transfer.transfer_id, transfer.status,
                 extra={"request_id": transfer.request_id, "transfer_id": transfer.transfer_id, "bank_code": transfer.to_bank})
     if transfer.status == TransferStatus.COMPLETED and not transfer.holder_name:

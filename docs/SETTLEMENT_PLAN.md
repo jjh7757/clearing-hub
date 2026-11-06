@@ -290,7 +290,7 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 | 5. 은행용 대사 API **완료** | 1일 | `GET /v1/settlements`, `/v1/settlements/{run_id}` (`service.list_for_bank`·`bank_view`), SPEC v0.6 10절 | 은행이 자기 거래만 본다. 다른 은행 포지션은 안 보인다 (S8, `tests/test_settlement_bank_api.py`) |
 | 6. AvengersBank 대사·정리 **완료** | 2일 | `LedgerAccount.HUB_RESERVE`, `LedgerEvent.SETTLE`, `interbank_ledger.hub_run_id`, `settlement_reconciliations`, `settlement_sync.py`·`settlement_sync_loop()` 워커, `hub_client.settlements()`·`settlement(run_id)`, `reconcile()`의 SETTLE·예치금 기대값. 관리자 조회 API는 AvengersBank에 관리자 인증이 없어 만들지 않음 | 정상 하루치가 `MATCHED`되고 `SETTLE` 분개가 한 번만 생긴다. 허브 기록에 우리에게 없는 거래가 있으면 `MISMATCH`와 diff가 나온다 (`tests/test_settlement_sync.py`) |
 | 7. 시연·문서 **완료** | 1일 | [DEMO.md](DEMO.md)(9절 대본, curl과 기대 숫자), `tests/test_demo_scenario.py`(9절 1~8을 허브 API로 끝까지), 가짜 은행 `…0006`(입금 없이 `200 COMPLETED`), DEPLOY "정산 배포 순서"(마이그레이션 → 재시작 → 은행마다 예치금·한도 → `/admin/reserve` 확인 → 개시 정산, `SETTLEMENT_*`), `902` 예치금은 시드 스크립트 대신 관리자 curl, PROJECT_PLAN·README·SPEC v0.6.1 | 9절 시나리오가 끝까지 돈다 (`uv run pytest tests/test_demo_scenario.py`) |
-| 8. 부인방지 | 3일 | 12절 전체: Ed25519 요청·응답 서명, 키 등록·회전, 전환 기간, 증거 보관, SPEC v1.0 | 허브가 은행 서명을 만들 수 없고, 받은 응답으로 상대의 "답한 사실"을 증명할 수 있다 |
+| 8. 부인방지 (**8a 완료**, 8b 남음) | 3일 | 12절 전체: Ed25519 요청·응답 서명, 키 등록·회전, 전환 기간, 증거 보관, SPEC v1.0 초안. 8a(허브·가짜 은행) 완료, 8b(AvengersBank)가 할 것은 12.10 | 허브가 은행 서명을 만들 수 없고, 받은 응답으로 상대의 "답한 사실"을 증명할 수 있다 |
 
 8단계는 돈의 흐름(1~7단계, 실제 금융망의 13단계)이 아니라 **신뢰 장치**다. 1~7과 독립이라 2단계 뒤 언제든 할 수 있지만, 규격이 깨지는 변경이라 다른 팀과 날짜를 맞춰야 한다 (12절).
 
@@ -402,7 +402,7 @@ AvengersBank `tests/test_settlement_sync.py`:
 | 4 | 헤더 | 요청: 기존 `X-Timestamp`·`X-Signature` + `X-Signature-Alg: ed25519`. 응답: `X-Response-Timestamp`, `X-Response-Signature`, `X-Signature-Alg` | `X-Signature-Alg`가 없으면 HMAC으로 본다 (전환 기간용) |
 | 5 | 은행 키 등록 | 은행이 키 쌍을 만들고 **공개키만** 허브에 등록: `PUT /v1/keys` (기존 HMAC으로 서명한 요청. 기존 인증을 부트스트랩으로 쓴다). 허브는 `banks.public_key`, `public_key_registered_at` 저장. 관리자도 `POST /admin/banks/{code}/public-key`로 넣을 수 있다 | 개인키는 허브에 절대 오지 않는다 |
 | 6 | 허브 키 | 허브 키 쌍은 환경 변수(`HUB_SIGNING_KEY`, 개인키 base64). 공개키는 `GET /v1/hub-key`(인증 불필요)로 주고, 지문(SHA-256 앞 16자)을 관리자가 은행에 따로 알려 준다 | 은행이 처음 받은 공개키가 진짜인지 지문으로 확인 |
-| 7 | 전환 | `banks.signature_mode`: `hmac` → `both` → `ed25519`. `both`에서는 둘 다 받고, 허브 → 은행 호출은 공개키가 등록돼 있으면 Ed25519로 서명한다. 은행이 준비되면 관리자가 `ed25519`로 바꾸고 HMAC을 끈다 | 2절의 키 재발급처럼 "겹치는 기간 없음"으로 하면 모든 은행이 같은 순간에 바꿔야 한다. 은행별 전환이 현실적 |
+| 7 | 전환 (8a에서 고침) | `banks.signature_mode`, 관리자만 바꾼다 (`PATCH /admin/banks/{code}/signature-mode`). **공개키를 등록해도 허브 동작은 바뀌지 않는다.** `hmac`(기본): 은행 → 허브 HMAC만, 허브 → 은행 HMAC, 응답 서명 요구 없음. `both`: 은행 → 허브 HMAC·Ed25519 둘 다(Ed25519는 공개키가 있어야), 허브 → 은행은 **아직 HMAC**, 응답 서명 요구 없음. `ed25519`: 은행 → 허브 Ed25519만, 허브 → 은행 Ed25519, 은행 응답에 **응답 서명 필수**. `ed25519`로 올리려면 은행 공개키와 허브 키가 있어야 한다(없으면 400 `PUBLIC_KEY_MISSING`·`HUB_KEY_MISSING`). 내리는 것은 언제든 된다. 은행은 받는 쪽(허브 서명 Ed25519 검증, 자기 응답 서명)을 먼저 준비한 뒤 전환을 요청한다 (SPEC 2.6 순서) | 2절의 키 재발급처럼 "겹치는 기간 없음"으로 하면 모든 은행이 같은 순간에 바꿔야 한다. 은행별 전환이 현실적. 처음 계획(`both`에서 공개키가 있으면 허브 → 은행을 Ed25519로)은 은행이 키를 등록하는 순간 받는 쪽이 준비되지 않았으면 입금이 401(`FAILED`)로 깨진다. 받는 쪽이 바뀌는 시점을 관리자 전환 하나로 모았다 |
 | 8 | 키 회전 | `PUT /v1/keys`를 **새 키로 서명하지 않고 현재 키로 서명**해서 다시 부른다. 이전 공개키는 `banks.previous_public_key`에 24시간 보관하고 그 동안 둘 다 받는다 | 유출 때 바로 바꿀 수 있고, 진행 중 재시도가 깨지지 않는다 |
 | 9 | 증거 보관 | 허브: `transfer_evidence` 테이블에 접수 요청의 원본 바이트·헤더·서명과, 받는 은행 `/receive` 응답의 본문·헤더·서명을 저장. 고치거나 지우지 않는다 | 분쟁 때 꺼내 보일 것. 서명은 원본 바이트에 대한 것이라 바이트 그대로 둔다 |
 | 10 | 상수 시간 비교 | Ed25519 검증은 라이브러리가 한다. 타임스탬프 5분 규칙은 그대로 | |
@@ -420,12 +420,17 @@ banks                       (변경)
 transfer_evidence           (새 테이블, 허브)
   evidence_id PK
   transfer_id FK index
-  direction                 REQUEST_IN (은행 → 허브 접수) | RECEIVE_OUT (허브 → 은행 /receive 요청) | RECEIVE_REPLY (은행의 응답)
-  headers_json              서명 관련 헤더만 (X-Bank-Code, X-Timestamp, X-Signature, X-Signature-Alg, X-Response-*)
+  direction                 REQUEST_IN (은행 → 허브 접수) | RECEIVE_OUT (허브 → 은행 /receive·/receive/{id} 요청) | RECEIVE_REPLY (은행의 응답)
+  method, path              요청만 (서명에 쓴 METHOD·규격 PATH. 다시 검증할 때 필요)
+  http_status               응답만 (응답 서명 메시지의 STATUS)
+  headers_json              서명 관련 헤더만 (X-Bank-Code, X-Timestamp, X-Signature, X-Signature-Alg, X-Request-ID, X-Response-*). X-Api-Key는 넣지 않는다
   body                      bytea / BLOB (원본 바이트)
-  signature_valid           bool  (받을 때 검증 결과)
+  signature_alg             hmac | ed25519 | NULL (서명 없는 응답)
+  signature_valid           bool, nullable (받을 때 검증 결과. 허브가 보낸 RECEIVE_OUT과, 요구하지 않는 응답 서명이 없을 때는 NULL)
   created_at
 ```
+
+응답(RECEIVE_REPLY)을 다시 검증할 때의 `request_signature`는 바로 앞 RECEIVE_OUT 행의 `X-Signature`다. 4.3 입금 확인(GET)도 남긴다: 확인 응답의 `COMPLETED`가 거래를 완료로 만든 근거이기 때문이다. 응답을 못 받은 호출은 RECEIVE_OUT만 남는다. 수취 조회·본인 계좌 조회·대사 조회는 남기지 않는다. 마이그레이션 `e5a1c7f3d9b2`.
 
 AvengersBank: `hub_evidence` 같은 표로 허브에서 받은 `/receive` 요청 원본과 허브 응답(허브 → 은행 호출의 응답은 은행이 서명하므로 자기 서명 원문도 보관)을 저장. 키 쌍은 `.env`(`HUB_SIGNING_KEY`)에.
 
@@ -434,15 +439,20 @@ AvengersBank: `hub_evidence` 같은 표로 허브에서 받은 `/receive` 요청
 ```
 요청 (은행 → 허브, 허브 → 은행 공통)
   보내는 쪽: message = ts\nMETHOD\nPATH\nbody → Ed25519 서명 → X-Signature, X-Signature-Alg: ed25519
-  받는 쪽:   X-Signature-Alg 보고 분기
-             ed25519 → 상대 공개키(현재 또는 24시간 안의 이전 키)로 검증
-             없음/hmac → signature_mode가 hmac·both일 때만 HMAC 검증, ed25519면 401 SIGNATURE_INVALID
-             검증 뒤 원본 바이트·헤더를 evidence에 저장 (이체 관련 요청만)
+             허브 → 은행은 받는 은행이 ed25519 모드일 때만 Ed25519, hmac·both면 HMAC (+ X-Signature-Alg: hmac)
+  받는 쪽:   X-Signature-Alg 보고 분기 (모르는 값은 401 SIGNATURE_INVALID)
+             ed25519 → signature_mode가 both·ed25519일 때만. 상대 공개키(현재 또는 24시간 안의 이전 키)로 검증
+             없음/hmac → signature_mode가 hmac·both일 때만 HMAC 검증
+             모드가 받지 않는 방식이면 401 SIGNATURE_INVALID (message에 모드 안내)
+             검증 뒤 원본 바이트·헤더를 evidence에 저장 (이체 접수, 새 거래일 때만)
 
-응답 (모든 2xx·4xx. 5xx는 본문 보장이 없으므로 서명도 없을 수 있다)
+응답 (2xx·4xx. 5xx는 본문 보장이 없으므로 서명도 없을 수 있다)
+  허브:      /v1/* 응답에 허브 키가 있으면 은행 모드와 상관없이 서명 (core/response_signing.py)
   답하는 쪽: message = response_ts\nSTATUS\n<요청의 X-Signature>\nresponse_body → 서명 → X-Response-* 헤더
-  받는 쪽:   서명 검증 실패면 "응답 없음"으로 취급 (이체는 PENDING → 4.3 확인, 수취 조회는 RECEIVER_ERROR)
-             검증 성공한 응답 바이트를 evidence에 저장
+  받는 쪽:   ed25519 모드 은행의 응답은 서명이 없거나 틀리면 "응답 없음"으로 취급 (BankReply status None, signature_valid False)
+               → 이체는 PENDING → 4.3 확인, 수취 조회는 502 RECEIVER_ERROR
+             hmac·both 모드 은행의 응답은 서명을 요구하지 않는다. 있으면 검증해 signature_valid만 기록
+             /receive·/receive/{id}의 요청·응답 바이트를 검증 결과와 함께 evidence에 저장 (처음·재시도 모두)
 ```
 
 응답 서명 검증 실패를 "거절"이 아니라 "응답 없음"으로 보는 이유: 받는 은행이 입금을 끝냈는데 서명 설정만 틀린 경우, `FAILED`로 끝내면 보내는 은행이 되돌려 이중 지급이 된다. SPEC 4.2의 원칙(모르면 되돌리지 않는다)과 같다.
@@ -458,7 +468,7 @@ AvengersBank: `hub_evidence` 같은 표로 허브에서 받은 `/receive` 요청
 | PATCH | `/admin/banks/{code}/signature-mode` | `hmac` / `both` / `ed25519` 전환 |
 | GET | `/admin/transfers/{id}/evidence` | 분쟁 조회: 그 거래의 요청·응답 원문과 서명 검증 결과 |
 
-### 12.6 SPEC v1.0
+### 12.6 SPEC v1.0 — 초안 반영됨 (8a: SPEC 2.1~2.6, 4절 머리말, 5절, 7절 4, 8절 17·19, 10.7)
 
 - 2절을 "2. 인증: 공개키 서명(권장) / HMAC(전환 기간)"으로 다시 쓴다. 메시지 형식은 그대로, 서명 함수와 헤더 `X-Signature-Alg`만 추가. Python 참고 구현(`cryptography`의 `Ed25519PrivateKey`) 추가. 검증용 예시: 고정 테스트 키 쌍과 예시 1·2의 서명 값
 - 새 절 **2.5 응답 서명**: 메시지 형식, 헤더, 검증 실패 시 "응답 없음" 취급
@@ -470,7 +480,7 @@ AvengersBank: `hub_evidence` 같은 표로 허브에서 받은 `/receive` 요청
 
 | 세션 | 내용 | 완료 기준 |
 |---|---|---|
-| 8a 허브·가짜 은행 (2일) | `core/signing.py`에 Ed25519 서명·검증·응답 서명, `core/auth.py` 분기, `bank_client.py` 응답 검증·evidence 저장, banks 모델·API, `transfer_evidence`, `bank_sim` Ed25519 검증·응답 서명, SPEC v1.0 초안 | 가짜 은행 `902`를 `ed25519`로 전환해도 기존 이체 테스트 전부 통과. `both`·`hmac`도 통과. 응답 서명 틀리면 PENDING → 4.3으로 COMPLETED |
+| 8a 허브·가짜 은행 (2일) **완료** | `core/signing.py`에 Ed25519 서명·검증·응답 서명, `core/auth.py` 분기, `bank_client.py` 응답 검증, `core/response_signing.py`(응답 서명 미들웨어), banks 모델·API(`/v1/hub-key`, `/v1/keys`, 관리자 `public-key`·`signature-mode`), `transfer_evidence`(`transfers/evidence.py`, 관리자 `/evidence`), `bank_sim` Ed25519 검증·응답 서명(`SIM_SIGNATURE_MODE`·`SIM_HUB_PUBLIC_KEY`·`SIM_SIGNING_KEY`), Alembic `e5a1c7f3d9b2`, SPEC v1.0 초안 | 가짜 은행 `902`를 `both`·`ed25519`로 전환해도 기존 이체 시나리오 통과, `hmac`에서 기존 123개 그대로 통과. 응답 서명이 틀리면 PENDING → 4.3으로 COMPLETED (`tests/test_nonrepudiation.py`, K1은 `tests/test_signing.py`) |
 | 8b AvengersBank (1일) | `interbank/signing.py` Ed25519, 키 등록 호출, 허브 공개키 검증, `/interbank/*` 응답 서명, evidence 보관, `.env` 키 | AvengersBank가 `ed25519` 모드로 허브와 왕복 이체 |
 
 ### 12.8 테스트
@@ -496,4 +506,25 @@ AvengersBank: `hub_evidence` 같은 표로 허브에서 받은 `/receive` 요청
 | 응답 서명 때문에 기존 은행의 응답이 "응답 없음"으로 바뀜 | `hmac` 모드 은행의 응답은 서명을 요구하지 않는다. `ed25519` 모드에서만 요구 |
 | 개인키 유출 | 회전 API + 관리자 `signature-mode`로 즉시 차단. 유출 전 서명 증거는 그대로 유효 |
 | 증거 테이블 크기 | 이체 관련 요청·응답만, 본문은 수백 바이트. 보관 기간은 미정 (범위 밖) |
-| 가짜 은행이 허브의 `signing`을 import함 | 8a에서 `bank_sim`에 참고 구현을 따로 둔다 (SPEC 7절 6과 일치) |
+| 가짜 은행이 허브의 `signing`을 import함 | 그대로 둔다 (8a 결정). 같은 저장소의 시험용 서버라 따로 두면 두 구현이 어긋날 위험만 생긴다. SPEC 2.3·2.5에 저장소 없이 쓰는 참고 구현을 두고, 7절 6의 "따로 가져갈 때는 참고 구현으로 바꾼다"를 유지한다 |
+| `ed25519` 은행이 응답 서명을 빠뜨림 | 이체가 모두 PENDING → UNKNOWN으로 쌓인다 (이중 지급은 없다). 전환 직후 ping의 `response_signature_valid`로 확인하고, 틀리면 관리자가 `both`로 내린다 |
+
+### 12.10 8b(AvengersBank)가 알아야 할 것 (8a에서 확정)
+
+규격은 SPEC v1.0 초안 2.1·2.2·2.3·2.5·2.6과 4절 머리말이 기준이다. 허브와 가짜 은행 `902`는 이미 이대로 돈다.
+
+| 항목 | 확정된 값 |
+|---|---|
+| 요청 헤더 | `X-Timestamp`, `X-Signature`(Ed25519 base64 88자), `X-Signature-Alg: ed25519`. 없으면 HMAC으로 본다. 허브는 HMAC으로 보낼 때도 `X-Signature-Alg: hmac`을 넣는다. `X-Api-Key`는 모든 모드에서 그대로 |
+| 요청 메시지 | 지금 HMAC과 같은 `f"{ts}\n{METHOD}\n{PATH}\n".encode() + body`. 허브 → 은행의 PATH는 `base_url` 뒤의 부분 |
+| 키 형식 | Ed25519 raw 32바이트의 표준 base64(44자). 서명은 raw 64바이트 base64(88자). 지문 `sha256(raw 공개키).hexdigest()[:16]` |
+| 응답 헤더 | `X-Response-Timestamp`, `X-Response-Signature`, `X-Signature-Alg: ed25519` |
+| 응답 메시지 | `f"{response_ts}\n{STATUS}\n{요청의 X-Signature 그대로}\n".encode() + 응답 본문 바이트`. 요청에 서명이 없으면 `""` |
+| 허브 공개키 | `GET /v1/hub-key`(인증 없음) → `{algorithm, public_key, fingerprint}`. 허브 관리자가 따로 알려 준 지문과 맞춰 `.env`에 저장 |
+| 키 등록 | `PUT /v1/keys` `{"public_key": ...}`, 지금 인증(HMAC)으로 서명. 응답 `{bank_code, fingerprint, signature_mode, registered_at, previous_fingerprint, previous_key_expires_at, hub_fingerprint}`. `GET /v1/keys`도 같은 형식 |
+| 회전 | 새 공개키로 `PUT /v1/keys`를 **지금 키로** 서명해 부른다. 허브는 옛 키를 24시간 받는다 (요청·응답 서명 모두) |
+| 모드별 허브 동작 | `hmac`: 지금과 같다. `both`: AvengersBank → 허브 Ed25519도 받음, 허브 → AvengersBank는 HMAC. `ed25519`: 허브 → AvengersBank Ed25519, AvengersBank의 `/interbank/*` 2xx·4xx 응답에 응답 서명이 없으면 "응답 없음"(이체 PENDING, 수취 조회 502) |
+| 허브 응답 | 허브는 `/v1/*` 2xx·4xx에 항상 응답 서명을 붙인다. `hub_client`에서 검증하고, 틀리면 본문을 믿지 말고 "모르는 상태"(3.4 확인)로 둔다 |
+| 전환 순서 | ① 키 쌍 생성(개인키는 `.env`의 `HUB_SIGNING_KEY` 같은 변수) ② 허브 공개키 받기·지문 확인 ③ `/interbank/*`가 `X-Signature-Alg`로 분기(ed25519는 허브 공개키, 그 밖은 secret)해 검증하고 2xx·4xx 응답에 서명 ④ `PUT /v1/keys` ⑤ 관리자 `both` ⑥ `hub_client`를 Ed25519로 ⑦ 관리자 `ed25519` + ping `response_signature_valid: true` |
+| 증거 | 허브는 이체 접수·`/receive`·`/receive/{id}` 원문을 보관한다 (`GET /admin/transfers/{id}/evidence`). AvengersBank는 `hub_evidence`에 허브가 보낸 `/receive` 요청 원문(헤더·바이트)과 자기 서명 응답, 자기가 보낸 `POST /v1/transfers` 요청과 허브의 서명 응답을 남긴다 |
+| 시험 | SPEC 2.3 예시 1·2와 2.5 예시 3의 고정 값으로 구현을 먼저 맞춘다. 허브 쪽 헬퍼는 `tests/conftest.py`의 `SignedBank.use_ed25519()`, 전환 순서는 `tests/test_nonrepudiation.py`의 `ed25519_banks` 픽스처 |

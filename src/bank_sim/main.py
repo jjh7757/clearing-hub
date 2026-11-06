@@ -8,8 +8,15 @@
 본인 계좌 조회(SPEC 9.4): 김철수 / 19850315 / 010-9876-5432 → 계좌 2개, 홍길동 / 19900101 / 010-0000-0000 → 1개
 (AvengersBank 시연 고객 demo와 같은 사람). 시험 고객의 계좌는 수취 조회·입금 응답에 그 고객 이름이 나온다.
 
-환경변수: SIM_HUB_SECRET(허브가 발급한 secret, 서명 검증), SIM_DELAY_SECONDS(지연, 기본 8),
+환경변수: SIM_HUB_SECRET(허브가 발급한 secret, HMAC 서명 검증), SIM_DELAY_SECONDS(지연, 기본 8),
           SIM_CI_KEY(가상 CI 키, 기본 example-ci-key-change-me)
+부인방지 (SPEC 2.3·2.5·2.6, SETTLEMENT_PLAN 12절):
+          SIM_SIGNATURE_MODE(hmac | both | ed25519, 기본 hmac): 허브 요청을 어떤 서명으로 받을지. 허브 관리자가 이 은행에
+            정한 signature_mode와 맞춘다. ed25519면 HMAC 요청을 401로 거절한다
+          SIM_HUB_PUBLIC_KEY(허브 공개키, GET /v1/hub-key): X-Signature-Alg: ed25519 요청 검증
+          SIM_SIGNING_KEY(이 은행의 Ed25519 개인키 base64): 있으면 2xx·4xx 응답에 응답 서명을 붙인다.
+            공개키는 허브에 등록한다 (PUT /v1/keys 또는 관리자 POST /admin/banks/902/public-key)
+          검증 키(SIM_HUB_SECRET / SIM_HUB_PUBLIC_KEY)가 비어 있으면 그 방식의 서명 검증은 건너뛴다 (로컬 시험용)
 실행: uv run uvicorn bank_sim.main:app --port 8100
 """
 
@@ -25,7 +32,8 @@ from pydantic import BaseModel, Field
 
 from clearing_hub.core.ci import virtual_ci
 from clearing_hub.core.log_setup import configure_logging
-from clearing_hub.core.signing import verify
+from clearing_hub.core.response_signing import ResponseSigningMiddleware
+from clearing_hub.core.signing import ALG_ED25519, ALG_HMAC, verify, verify_ed25519
 
 HOLDER_NAME = "김철수"
 app = FastAPI(title="BankSim (가짜 은행)")
@@ -34,6 +42,11 @@ server_errors_left: dict[str, int] = {}  # 0004: transfer_id → 남은 500 횟�
 seen_request_ids: list[tuple[str, str | None]] = []  # (경로, 받은 X-Request-ID). 최근 것만 둔다
 logger = logging.getLogger("bank_sim")
 configure_logging()  # 허브와 같은 JSON 로그
+# 자기 응답에 서명 (SPEC 2.5). 허브와 같은 미들웨어를 쓴다 (따로 가져갈 때는 SPEC 2.5 참고 구현으로 바꾼다)
+app.add_middleware(ResponseSigningMiddleware, key_getter=lambda: os.environ.get("SIM_SIGNING_KEY"),
+                   path_prefix="/interbank/")
+# 모드별로 받는 알고리즘. 허브의 core/auth.ALLOWED_ALGS와 같은 규칙 (SPEC 2.6)
+ALLOWED_ALGS = {"hmac": {ALG_HMAC}, "both": {ALG_HMAC, ALG_ED25519}, "ed25519": {ALG_ED25519}}
 
 
 def _error(status: int, code: str, message: str, transfer_id: str | None = None) -> JSONResponse:
@@ -58,22 +71,29 @@ async def verify_hub(
     x_bank_code: Annotated[str | None, Header()] = None,
     x_timestamp: Annotated[str | None, Header()] = None,
     x_signature: Annotated[str | None, Header()] = None,
+    x_signature_alg: Annotated[str | None, Header()] = None,
     x_request_id: Annotated[str | None, Header()] = None,
 ) -> None:
-    """허브(X-Bank-Code 000)의 서명을 허브가 준 secret으로 검증한다. secret이 없으면 검증하지 않는다 (로컬 시험용)."""
+    """허브(X-Bank-Code 000)의 서명을 검증한다. `X-Signature-Alg: ed25519`면 허브 공개키로, 없거나 hmac이면 secret으로.
+    SIM_SIGNATURE_MODE가 받지 않는 방식이면 401 SIGNATURE_INVALID. 그 방식의 검증 키가 없으면 검증하지 않는다 (로컬 시험용)."""
     # SPEC 2.4: 추적 ID는 서명 대상이 아니다. 받은 그대로 로그에 남긴다 (없어도·형식이 틀려도 거절하지 않는다)
     seen_request_ids.append((request.url.path, x_request_id))
     del seen_request_ids[:-100]  # 오래 켜 둬도 메모리가 쌓이지 않게
     logger.info("허브 요청 %s %s", request.method, request.url.path,
                 extra={"request_id": x_request_id, "method": request.method, "path": request.url.path})
-    secret = os.environ.get("SIM_HUB_SECRET")
-    if not secret:
+    alg = (x_signature_alg or ALG_HMAC).strip().lower()
+    mode = os.environ.get("SIM_SIGNATURE_MODE", "hmac").strip().lower()
+    if alg not in ALLOWED_ALGS.get(mode, {ALG_HMAC}):
+        raise SignatureError("SIGNATURE_INVALID")
+    key = os.environ.get("SIM_HUB_PUBLIC_KEY" if alg == ALG_ED25519 else "SIM_HUB_SECRET")
+    if not key:
         return
     if x_bank_code != "000" or not (x_timestamp and x_signature):
         raise SignatureError("UNAUTHORIZED")
     # 서명 경로는 base_url(`.../interbank`) 뒤의 부분이다 (SPEC 2.2). 프록시가 앞에 무엇을 붙여도 같다
     spec_path = request.url.path.partition("/interbank")[2]
-    error = verify(secret, x_timestamp, request.method, spec_path, await request.body(), x_signature)
+    check = verify_ed25519 if alg == ALG_ED25519 else verify
+    error = check(key, x_timestamp, request.method, spec_path, await request.body(), x_signature)
     if error:
         raise SignatureError(error)
 

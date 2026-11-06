@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,9 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from clearing_hub.core.auth import current_bank, require_admin
 from clearing_hub.core.database import get_db
 from clearing_hub.core.exception_handlers import error_body, spec_http_status
-from clearing_hub.core.exceptions import ApiException
+from clearing_hub.core.exceptions import ApiException, NotFound
 from clearing_hub.domains.banks.models import Bank
-from clearing_hub.domains.transfers import service
+from clearing_hub.domains.transfers import evidence, service
 from clearing_hub.domains.transfers.models import Transfer, TransferEvent, TransferStatus
 from clearing_hub.domains.transfers.schemas import TransferDetail, TransferRequest, TransferResolve, TransferResult
 
@@ -41,10 +41,12 @@ def _result_response(transfer: Transfer) -> JSONResponse:
 
 
 @router.post("", responses={200: {"model": TransferResult}, 202: {"model": TransferResult}})
-async def create_transfer(data: TransferRequest, db: DB, sender: Sender):
+async def create_transfer(data: TransferRequest, db: DB, sender: Sender, request: Request):
     """이체 요청 (SPEC 3.3). 보내는 은행은 이 요청 전에 출금을 끝내 둔다."""
     try:
-        transfer, _ = await service.accept_and_deliver(db, sender, data)
+        # 서명 검증을 통과한 요청 원문을 증거로 넘긴다 (core/auth.current_bank가 request.state에 둔다)
+        transfer, _ = await service.accept_and_deliver(db, sender, data,
+                                                        request_evidence=getattr(request.state, "verified", None))
     except ApiException as exc:
         # 접수 전 거절(SAME_BANK·LIMIT_EXCEEDED(1회 상한·순채무한도)·BANK_NOT_FOUND·BANK_INACTIVE·ACCOUNT_REF_INVALID):
         # 거래가 허브에 없으므로
@@ -80,6 +82,15 @@ def _admin_view(t: Transfer) -> dict:
 async def admin_transfer_events(transfer_id: str, db: DB):
     stmt = select(TransferEvent).where(TransferEvent.transfer_id == transfer_id).order_by(TransferEvent.event_id)
     return [{"from": e.from_status, "to": e.to_status, "detail": e.detail, "at": e.created_at} for e in (await db.scalars(stmt)).all()]
+
+
+@admin_router.get("/{transfer_id}/evidence")
+async def admin_transfer_evidence(transfer_id: str, db: DB):
+    """분쟁 조회 (SETTLEMENT_PLAN 12.5): 접수 요청·/receive 요청·응답 원문과 서명 검증 결과.
+    body는 원본 바이트의 UTF-8 문자열 (디코드 안 되면 base64, body_encoding). 서명은 이 바이트로 다시 검증할 수 있다."""
+    if await db.get(Transfer, transfer_id) is None:
+        raise NotFound("TRANSFER_NOT_FOUND", "거래를 찾을 수 없습니다", transfer_id)
+    return await evidence.list_for_transfer(db, transfer_id)
 
 
 @admin_router.post("/confirm-pending")

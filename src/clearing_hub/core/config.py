@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,22 @@ class Settings(BaseSettings):
     settlement_cutoff_time: str = Field(default="00:05", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")  # 매일 마감 배치 시각 (HH:MM)
     settlement_timezone: str = "Asia/Seoul"  # 정산일·마감 시각의 기준 시간대
     settlement_auto_confirm: bool = False  # true면 DRAFT를 대사 없이 바로 확정 (시연용)
+    # 부인방지 (SETTLEMENT_PLAN 12절, SPEC 2.3·2.5·2.6). 허브 Ed25519 개인키(raw 32바이트 base64).
+    # 없으면 허브는 Ed25519로 보내지도(ed25519 모드 전환 불가, HUB_KEY_MISSING) 응답에 서명하지도 못한다. 받는 것(both)은 된다
+    hub_signing_key: SecretStr | None = None
+    previous_key_ttl_seconds: int = Field(default=86400, gt=0)  # 은행 공개키 교체 뒤 이전 키를 받아 주는 시간 (12.2 8번)
+
+    @field_validator("hub_signing_key", mode="before")
+    @classmethod
+    def _check_hub_key(cls, value):
+        """빈 값은 키 없음. 형식이 틀린 키는 서버 시작 때 바로 알린다 (첫 이체에서 터지지 않게)."""
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if raw is None or not str(raw).strip():
+            return None
+        from clearing_hub.core.signing import public_key_of  # signing이 config를 import하지 않으므로 순환 없음
+
+        public_key_of(str(raw).strip())  # 틀리면 ValueError → 설정 오류
+        return str(raw).strip()
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

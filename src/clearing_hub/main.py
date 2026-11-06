@@ -8,9 +8,11 @@ from clearing_hub.core.database import engine
 from clearing_hub.core.exception_handlers import register_exception_handlers
 from clearing_hub.core.log_setup import configure_logging
 from clearing_hub.core.request_id import RequestIdMiddleware
+from clearing_hub.core.response_signing import ResponseSigningMiddleware
 from clearing_hub.domains.accounts.router import admin_router as account_admin_router
 from clearing_hub.domains.accounts.router import router as account_router
 from clearing_hub.domains.banks.router import admin_router as bank_admin_router
+from clearing_hub.domains.banks.router import keys_router
 from clearing_hub.domains.banks.router import router as bank_router
 from clearing_hub.domains.inquiry.router import router as inquiry_router
 from clearing_hub.domains.reserve.router import admin_router as reserve_admin_router
@@ -41,9 +43,19 @@ async def lifespan(app: FastAPI):
 
 configure_logging()  # JSON 로그, 모든 줄에 request_id (SPEC 2.4)
 app = FastAPI(title="ClearingHub", lifespan=lifespan)
+
+
+def _hub_signing_key() -> str | None:
+    key = get_settings().hub_signing_key
+    return key.get_secret_value() if key is not None else None
+
+
+# 나중에 더한 미들웨어가 바깥이다: RequestId가 가장 바깥이어야 처리하지 못한 500에도 X-Request-ID가 붙는다
+app.add_middleware(ResponseSigningMiddleware, key_getter=_hub_signing_key, path_prefix="/v1/")  # 응답 서명 (SPEC 2.5)
 app.add_middleware(RequestIdMiddleware)  # X-Request-ID 받기·만들기·응답에 붙이기 (SPEC 2.4)
 register_exception_handlers(app)
 app.include_router(bank_router)
+app.include_router(keys_router)
 app.include_router(inquiry_router)
 app.include_router(transfer_router)
 app.include_router(account_router)
@@ -58,4 +70,4 @@ app.include_router(settlement_admin_router)
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v0.6.1"}  # docs/SPEC.md 버전과 맞춘다
+    return {"service": "ClearingHub", "spec": "v1.0"}  # docs/SPEC.md 버전과 맞춘다

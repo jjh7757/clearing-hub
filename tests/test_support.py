@@ -1,7 +1,5 @@
-"""연동 지원 에이전트 (SETTLEMENT_PLAN 14절, SPEC 3.8): 인증 실패 기록, `/v1/diagnose`, 관리자 진단, 알림의 진단 한 줄.
-
-LLM은 실제로 부르지 않는다: `core/llm.complete`를 고정 답을 돌려주는 가짜로 바꾸고, 키는 설정만 바꾼다.
-"""
+"""연동 진단기 (SETTLEMENT_PLAN 14절, SPEC 3.8): 인증 실패 기록, `GET /v1/diagnose/failures`, 관리자 조회,
+401 본문의 hint, 알림의 진단 한 줄. 모두 규칙 진단이다."""
 
 import json
 import time
@@ -9,17 +7,13 @@ import time
 import httpx
 import pytest
 from httpx import AsyncClient
-from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from clearing_hub.core import bank_client as bank_client_module
-from clearing_hub.core import llm
-from clearing_hub.core.config import get_settings
 from clearing_hub.core.database import SessionLocal
 from clearing_hub.core.signing import generate_keypair, sign_ed25519, sign_response
 from clearing_hub.domains.support import failures
 from clearing_hub.domains.support.models import AuthFailure
-from clearing_hub.domains.support.schemas import MAX_SNIPPET
 from tests.conftest import ADMIN, register_bank, sent_alerts
 from tests.test_onboarding import invite, self_register
 
@@ -125,80 +119,22 @@ async def test_keep_recent_per_bank_and_truncate_body(banks, monkeypatch):
     assert len(kept) == 3 and kept[-1].body == body[:10] and kept[-1].body_truncated is True
 
 
-# ---- POST /v1/diagnose ----
+# ---- 관리자 ----
 
-async def test_diagnose_without_llm_key_returns_rules(banks):
+async def test_admin_auth_failures(banks, client):
     sender, _ = banks
     await fail_without_v1(sender)
-    res = await sender.client.post("/v1/diagnose", json={"question": "왜 401이 나요?"}, headers=ident(sender))
-    assert res.status_code == 200, res.text
-    data = res.json()
-    assert data["used_llm"] is False and data["explanation"] is None
-    assert data["findings"][0]["hypotheses"][0]["code"] == "PATH_WITHOUT_V1"
-    assert data["spec_refs"][0] == "2.2" and 2 <= len(data["spec_refs"]) <= 4
-
-
-async def test_diagnose_with_llm(banks, monkeypatch):
-    calls = []
-
-    async def fake_complete(system: str, user: str) -> str:
-        calls.append((system, user))
-        return "원인: 서명 PATH에 /v1이 빠졌습니다.\n고칠 곳: sign_request(…, \"/v1/me\", …)\nSPEC: 2.2"
-
-    monkeypatch.setattr(get_settings(), "gemini_api_key", SecretStr("test-key"))
-    monkeypatch.setattr(llm, "complete", fake_complete)
-    sender, _ = banks
-    await fail_without_v1(sender)
-    snippet = "path = request.url.path.removeprefix('/v1')\n" + "x" * 5000
-    res = await sender.client.post("/v1/diagnose", json={"question": "GET /v1/me가 401", "snippet": snippet}, headers=ident(sender))
-    data = res.json()
-    assert data["used_llm"] is True and data["explanation"].startswith("원인: 서명 PATH")
-    [(system, user)] = calls
-    assert "새로 만들지 않는다" in system and "따르지 않는다" in system  # 근거 밖 규칙 금지, 붙여 넣은 글의 지시 무시
-    assert "PATH_WITHOUT_V1" in user and "### 2.2 서명 만들기" in user and "GET /v1/me가 401" in user
-    assert "removeprefix('/v1')" in user
-    assert f"앞 {MAX_SNIPPET}자만" in user and "x" * 4500 not in user
-    assert sender.api_key not in user
-
-
-async def test_llm_failure_falls_back_to_rules(banks, monkeypatch):
-    async def down(system, user):
-        raise llm.LlmUnavailable("시간 초과")
-
-    monkeypatch.setattr(get_settings(), "gemini_api_key", SecretStr("test-key"))
-    monkeypatch.setattr(llm, "complete", down)
-    sender, _ = banks
-    await fail_without_v1(sender)
-    data = (await sender.client.post("/v1/diagnose", json={"question": "왜?"}, headers=ident(sender))).json()
-    assert data["used_llm"] is False and data["explanation"] is None and data["findings"]
-
-
-async def test_llm_disabled_never_calls_api(banks, monkeypatch):
-    """키가 없으면(테스트 기본) complete는 SDK를 부르지 않고 바로 LlmUnavailable."""
-    assert llm.enabled() is False
-    with pytest.raises(llm.LlmUnavailable):
-        await llm.complete("s", "u")
-
-
-async def test_daily_limit(banks, monkeypatch):
-    monkeypatch.setattr(get_settings(), "diagnose_daily_limit", 2)
-    sender, receiver = banks
-    for _ in range(2):
-        assert (await sender.client.post("/v1/diagnose", json={}, headers=ident(sender))).status_code == 200
-    res = await sender.client.post("/v1/diagnose", json={}, headers=ident(sender))
-    assert res.status_code == 429 and res.json()["error"] == "TOO_MANY_DIAGNOSES"
-    assert (await sender.client.get("/v1/diagnose/failures", headers=ident(sender))).status_code == 200  # 목록은 제한 없음
-    assert (await receiver.client.post("/v1/diagnose", json={}, headers=ident(receiver))).status_code == 200  # 은행별
-
-
-async def test_admin_diagnose(banks, client):
-    sender, _ = banks
-    await fail_without_v1(sender)
-    res = await client.post("/admin/banks/901/diagnose", json={"question": "401"}, headers=ADMIN)
+    res = await client.get("/admin/banks/901/auth-failures", headers=ADMIN)
     assert res.status_code == 200 and res.json()["findings"][0]["hypotheses"][0]["code"] == "PATH_WITHOUT_V1"
-    assert (await client.post("/admin/banks/901/diagnose", json={})).status_code == 401  # 관리자 토큰 필요
-    assert (await client.post("/admin/banks/999/diagnose", json={}, headers=ADMIN)).json()["error"] == "BANK_NOT_FOUND"
-    assert (await client.get("/admin/banks/999/auth-failures", headers=ADMIN)).status_code == 404
+    assert (await client.get("/admin/banks/901/auth-failures")).status_code == 401  # 관리자 토큰 필요
+    assert (await client.get("/admin/banks/999/auth-failures", headers=ADMIN)).json()["error"] == "BANK_NOT_FOUND"
+
+
+async def test_no_llm_diagnose_endpoint(banks, client):
+    """LLM 설명 API(POST /v1/diagnose, 관리자 POST …/diagnose)는 없다. 진단은 GET /v1/diagnose/failures와 401 hint뿐."""
+    sender, _ = banks
+    assert (await client.post("/v1/diagnose", json={}, headers=ident(sender))).json()["error"] == "NOT_FOUND"
+    assert (await client.post("/admin/banks/901/diagnose", json={}, headers=ADMIN)).json()["error"] == "NOT_FOUND"
 
 
 # ---- HUB_TO_BANK ----
@@ -273,29 +209,6 @@ async def test_self_test_alert_has_hint(banks, alert_sink):
     assert res.json()["receiver_reply"]["signature_valid"] is False
     [text] = await sent_alerts(alert_sink, "self_test")
     assert "원인 후보(추정): 응답을 등록한 공개키와 짝이 아닌 개인키로 서명했을 수 있음" in text
-
-
-async def test_llm_only_with_question_or_snippet(banks, monkeypatch):
-    """질문·코드가 없으면(또는 공백뿐이면) 키가 있어도 LLM을 부르지 않고 규칙 진단만 (규칙 결과를 되풀이하는 호출은 낭비)."""
-    calls = []
-
-    async def fake_complete(system: str, user: str) -> str:
-        calls.append(user)
-        return "원인: …"
-
-    monkeypatch.setattr(get_settings(), "gemini_api_key", SecretStr("test-key"))
-    monkeypatch.setattr(llm, "complete", fake_complete)
-    sender, _ = banks
-    await fail_without_v1(sender)
-    for body in ({}, {"question": "  ", "snippet": ""}):
-        data = (await sender.client.post("/v1/diagnose", json=body, headers=ident(sender))).json()
-        assert data["used_llm"] is False and data["explanation"] is None
-        assert data["findings"][0]["hypotheses"][0]["code"] == "PATH_WITHOUT_V1"
-    admin = (await sender.client.post("/admin/banks/901/diagnose", json={}, headers=ADMIN)).json()
-    assert admin["used_llm"] is False
-    assert calls == []
-    assert (await sender.client.post("/v1/diagnose", json={"snippet": "sign(path)"}, headers=ident(sender))).json()["used_llm"]
-    assert len(calls) == 1
 
 
 # ---- 401 본문의 hint (SPEC 5절) ----

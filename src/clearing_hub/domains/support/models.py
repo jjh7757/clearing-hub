@@ -1,4 +1,4 @@
-"""연동 지원 (SETTLEMENT_PLAN 14절): 인증 실패 기록 `auth_failures`, 진단 요청 기록 `diagnose_logs`."""
+"""연동 진단 (SETTLEMENT_PLAN 14절): 인증 실패 기록 `auth_failures`."""
 
 from datetime import datetime
 from enum import StrEnum
@@ -20,7 +20,7 @@ class AuthFailure(Base):
     서명을 다시 계산해 보려면 받은(보낸) 바이트가 그대로 있어야 하므로 body는 원문 그대로 둔다 (64KB까지, 넘으면 앞부분과
     body_truncated). headers_json에는 서명 관련 헤더와 X-Request-ID만 넣는다. **X-Api-Key는 저장하지 않는다**
     (보냈는지만 api_key_sent). bank_code는 API 키가 맞은 은행일 때만 채운다: 키가 틀린 요청은 누구의 것인지 모르므로
-    은행 API(/v1/diagnose)로는 아무도 못 보고, 관리자만 claimed_bank_code로 본다."""
+    은행 API(/v1/diagnose/failures)로는 아무도 못 보고, 관리자만 claimed_bank_code로 본다."""
 
     __tablename__ = "auth_failures"
     __table_args__ = (Index("ix_auth_failures_bank", "bank_code", "failure_id"),
@@ -47,13 +47,3 @@ class AuthFailure(Base):
     response_signature_valid: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-
-class DiagnoseLog(Base):
-    """POST /v1/diagnose 호출 기록 (하루 한도 DIAGNOSE_DAILY_LIMIT를 세는 데 쓴다). 관리자 진단은 남기지 않는다."""
-
-    __tablename__ = "diagnose_logs"
-
-    log_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    bank_code: Mapped[str] = mapped_column(String(3), index=True, nullable=False)
-    used_llm: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

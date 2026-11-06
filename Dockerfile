@@ -12,8 +12,6 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini ./
-# 연동 지원 LLM 설명의 SPEC 발췌 (domains/support/spec_search.py, SPEC_PATH 기본값 docs/SPEC.md)
-COPY docs/SPEC.md ./docs/SPEC.md
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"

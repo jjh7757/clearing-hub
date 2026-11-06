@@ -1,4 +1,4 @@
-"""요청 인증 의존성: 참가 은행(Ed25519 서명), 연동 지원용 은행 식별(API 키만, SPEC 3.8), 관리자(토큰)."""
+"""요청 인증 의존성: 참가 은행(Ed25519 서명), 연동 진단용 은행 식별(API 키만, SPEC 3.8), 관리자(토큰)."""
 
 import asyncio
 import hmac
@@ -45,7 +45,7 @@ async def current_bank(
     공개키는 현재 키와, 교체 뒤 24시간 안의 이전 키다. `X-Signature-Alg`는 `ed25519`이거나 없어야 한다 (없으면 ed25519).
     허브는 은행의 비밀을 갖지 않으므로, 허브 DB가 통째로 새도 이 검증을 통과하는 요청은 만들 수 없다.
 
-    401을 낼 때마다 `auth_failures`에 한 건 남긴다 (연동 지원, SPEC 3.8). API 키가 맞은 은행이면 그 코드로 남겨
+    401을 낼 때마다 `auth_failures`에 한 건 남긴다 (연동 진단, SPEC 3.8). API 키가 맞은 은행이면 그 코드로 남겨
     은행이 `GET /v1/diagnose/failures`로 스스로 보고, 키가 틀리면 은행을 모르므로 bank_code 없이 남긴다.
     API 키가 맞은 은행이면 401 본문에 규칙 진단 1순위 가설 한 줄(`hint`, SPEC 5절)도 넣는다. 키가 틀린 요청에는 넣지
     않는다 (외부 스캐너에 서명 규칙을 알려 주지 않는다)."""
@@ -116,7 +116,7 @@ async def identified_bank(
     x_bank_code: Annotated[str | None, Header()] = None,
     x_api_key: Annotated[str | None, Header()] = None,
 ) -> Bank:
-    """서명 없이 X-Bank-Code·X-Api-Key만으로 은행을 찾는다 (연동 지원 API, SPEC 3.8). 서명이 안 되는 상태에서 원인을
+    """서명 없이 X-Bank-Code·X-Api-Key만으로 은행을 찾는다 (연동 진단 API, SPEC 3.8). 서명이 안 되는 상태에서 원인을
     찾으려고 부르는 읽기 전용 API에만 쓴다 (돈·등록 정보를 바꾸는 API에는 쓰지 않는다). 비활성 은행도 자기 실패는 본다.
     이 의존성의 401은 auth_failures에 남기지 않는다 (서명 검증을 하지 않았으므로 진단할 것이 없다)."""
     if not (x_bank_code and x_api_key):

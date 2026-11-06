@@ -103,7 +103,7 @@ async def test_invite_message(client, monkeypatch):
                  "POST http://hub/v1/banks/register", "invite_code·name·base_url·public_key", "한 번만", "공개 채널"):
         assert part in message, part
     assert "KST" in message
-    assert "401이 나면 응답 본문의 hint를 먼저 보고" in message and "POST http://hub/v1/diagnose (X-Bank-Code·X-Api-Key만, 서명 없이) — SPEC 3.8" in message
+    assert "401이 나면 응답 본문의 hint를 먼저 보고" in message and "GET http://hub/v1/diagnose/failures (X-Bank-Code·X-Api-Key만, 서명 없이) — SPEC 3.8" in message
 
     monkeypatch.setattr(get_settings(), "hub_public_url", "https://clearing-hub.example.com/")
     message = (await client.post("/admin/invites", json={}, headers=ADMIN)).json()["message"]

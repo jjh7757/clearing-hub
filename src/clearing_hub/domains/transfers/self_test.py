@@ -112,7 +112,7 @@ def _alert_if_broken(bank: Bank, transfer_id: str, what: str, reply: BankReply) 
         problem = f"HTTP {status}"
     else:
         return
-    hint = support_service.reply_hint(bank, reply)  # 규칙 진단 1순위 가설 한 줄 (LLM 없음)
+    hint = support_service.reply_hint(bank, reply)  # 규칙 진단 1순위 가설 한 줄
     alerts.notify("self_test", f"셀프 시험: 은행 {bank.bank_code}의 {what}가 {problem}로 답했습니다. "
                   "그 은행으로 가는 이체가 PENDING이 될 수 있습니다" + (f"\n{hint}" if hint else ""),
                   bank_code=bank.bank_code, transfer_id=transfer_id)

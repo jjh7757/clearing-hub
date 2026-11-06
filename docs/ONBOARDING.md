@@ -6,7 +6,7 @@
 2. **알림 대응** — dispute, `OVERDUE`, `UNKNOWN`, ping 실패 등이 관리자 채널(`ALERT_WEBHOOK_URL`)에 오면 (5)
 3. **예치금·한도 요청 처리** — 은행이 더 보내야 한다고 하면 (4)
 
-팀이 "왜 401이 나요?"라고 물으면 `POST /admin/banks/{code}/diagnose` 결과를 그대로 보내 준다 (7). 은행이 같은 진단을 `GET /v1/diagnose/failures`로 스스로 볼 수 있다.
+팀이 "왜 401이 나요?"라고 물으면 `GET /admin/banks/{code}/auth-failures` 결과를 그대로 보내 준다 (7). 은행도 401 본문의 `hint`와 `GET /v1/diagnose/failures`로 같은 진단을 스스로 볼 수 있다.
 
 이 문서는 그 셋을 할 때 보는 곳을 모은 것이다.
 
@@ -108,7 +108,7 @@ curl -s -X PATCH $HUB/admin/banks/903 -H "X-Admin-Token: $TOKEN" -H "Content-Typ
 | ping 실패 (`ping_failed`: 은행의 `PATCH /v1/me` 주소 변경이 거절됨), 셀프 등록 ping 실패 (`register`) | 알림 둘째 줄의 `원인 후보`, `POST /admin/banks/<code>/ping` | 주소는 바뀌지 않았다 (은행도 같은 결과를 받았다). 그 은행이 고치는지 지켜보고, 오래 안 되면 연락한다. 은행도 `GET /v1/diagnose/failures`로 같은 원인 후보를 본다 (7) |
 | 셀프 시험 5xx·서명 실패 (`self_test`), 가짜 은행 문제 (`sim_bank`) | 3 | 3 |
 | 어떤 은행으로 가는 이체가 계속 `PENDING` (알림 없음, 은행이 알려 옴) | `POST /admin/banks/<code>/ping` | `response_signature_valid: false`거나 연결 안 됨. 그 은행에 ping 결과를 보낸다 |
-| 은행 요청이 계속 401 ("왜 401이 나요?") | 7 | `POST /admin/banks/<code>/diagnose` 결과를 그대로 보내 준다 |
+| 은행 요청이 계속 401 ("왜 401이 나요?") | 7 | `GET /admin/banks/<code>/auth-failures` 결과를 그대로 보내 준다 |
 
 ## 6. 키 문제
 
@@ -122,18 +122,16 @@ curl -s -X PATCH $HUB/admin/banks/903 -H "X-Admin-Token: $TOKEN" -H "Content-Typ
 
 허브는 은행의 비밀을 갖지 않는다 (공개키·API 키 해시뿐). 허브 DB가 새도 은행 명의의 요청은 만들 수 없지만, `ADMIN_TOKEN`이 새면 관리자 API로 공개키를 바꿀 수 있으므로 토큰은 `.env`에만 둔다.
 
-## 7. 팀이 401로 막혔다고 하면 (연동 지원)
+## 7. 팀이 401로 막혔다고 하면 (연동 진단)
 
-**먼저 은행이 스스로 보게 한다.** API 키가 맞은 은행의 401 본문에는 1순위 가설 한 줄(`hint`)이 이미 들어 있다 (SPEC 5절). 은행은 서명 없이 `X-Bank-Code`·`X-Api-Key`만으로 `GET /v1/diagnose/failures`를 불러 자기 인증 실패와 원인 가설을 본다 (SPEC 3.8, 7절 8). 허브가 실패한 요청을 흔한 실수 변형(`/v1` 빠짐, JSON 다시 직렬화, 경로 뒤 줄바꿈 누락, hex 서명, 밀리초 등)으로 다시 계산해 맞는 것을 찾으므로, 1순위 가설이 `verified: true`면 그것이 원인이다.
+**먼저 은행이 스스로 보게 한다.** API 키가 맞은 은행의 401 본문에는 1순위 가설 한 줄(`hint`)이 이미 들어 있다 (SPEC 5절). 자세히는 은행이 서명 없이 `X-Bank-Code`·`X-Api-Key`만으로 `GET /v1/diagnose/failures`를 불러 자기 인증 실패와 원인 가설을 본다 (SPEC 3.8, 7절 8). 허브가 실패한 요청을 흔한 실수 변형(`/v1` 빠짐, JSON 다시 직렬화, 경로 뒤 줄바꿈 누락, hex 서명, 밀리초 등)으로 다시 계산해 맞는 것을 찾으므로, 1순위 가설이 `verified: true`면 그것이 원인이다.
 
-그래도 물어 오면 관리자가 같은 진단을 돌려 **결과를 그대로 보내 준다**:
+그래도 물어 오면 관리자가 같은 진단을 보고 **결과를 그대로 보내 준다**:
 
 ```bash
-curl -s -X POST $HUB/admin/banks/903/diagnose -H "X-Admin-Token: $TOKEN" -H "Content-Type: application/json" -d '{"question":"POST /v1/transfers가 401"}' | python3 -m json.tool
+curl -s "$HUB/admin/banks/903/auth-failures?limit=20" -H "X-Admin-Token: $TOKEN" | python3 -m json.tool
 ```
 
-- 관리자 진단은 은행 진단과 같고, 추가로 **API 키가 틀려 은행이 볼 수 없는 실패**(`X-Bank-Code`만 그 은행인 것)도 넣는다. 1순위가 `API_KEY_MISMATCH`면 은행이 API 키를 잘못 넣었거나 재발급 전 키를 쓰는 것이다 (필요하면 6의 API 키 재발급)
-- `explanation`은 LLM(Gemini) 설명이다(`GEMINI_API_KEY`가 있고 `question`이나 `snippet`을 넣었을 때만, 아니면 `null`). 원인 판단은 `findings[].hypotheses`가 근거이고, 설명은 그것을 문장으로 풀어 쓴 것이다
-- 실패만 빠르게 보려면 `GET /admin/banks/903/auth-failures?limit=50` (LLM 없음)
+- 관리자 목록은 은행 목록과 같고, 추가로 **API 키가 틀려 은행이 볼 수 없는 실패**(`X-Bank-Code`만 그 은행인 것)도 넣는다. 1순위가 `API_KEY_MISMATCH`면 은행이 API 키를 잘못 넣었거나 재발급 전 키를 쓰는 것이다 (필요하면 6의 API 키 재발급)
 - 은행 서버가 허브 요청을 401·403으로 거절했거나 응답 서명이 틀린 것(`direction: HUB_TO_BANK`)도 같은 목록에 나온다. 이때 가설은 은행 쪽 검증 코드(`BANK_VERIFY_PATH` 등)나 응답 서명(`RESPONSE_*`)이다
 - 실패는 은행별 최근 200건만 남는다. `X-Api-Key` 값은 저장하지 않는다

@@ -7,7 +7,7 @@
 | [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) | 계획서: 배경, 구조, 데이터 모델, 일정, 리스크 |
 | [docs/SPEC.md](docs/SPEC.md) | **참가 은행 연동 규격** (다른 팀에 전달하는 문서) |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | AWS 배포: 처음 한 번 할 일, 가짜 은행 연결, 서버 `.env`, 정산 배포 순서(예치금), Ed25519 필수화 배포 순서 |
-| [docs/ONBOARDING.md](docs/ONBOARDING.md) | 허브 관리자용: 새 팀에 초대 코드 보내기, 등록 확인, 예치금·키 문제, 문제가 생겼을 때 보는 곳, 401 문의 (연동 지원 진단) |
+| [docs/ONBOARDING.md](docs/ONBOARDING.md) | 허브 관리자용: 새 팀에 초대 코드 보내기, 등록 확인, 예치금·키 문제, 문제가 생겼을 때 보는 곳, 401 문의 (연동 진단) |
 | [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md) | 정산 계획서: 예치금 원장, 순채무한도, 마감 상계, 대사, 확정, 부인방지(12절) |
 | [docs/DEMO.md](docs/DEMO.md) | 시연 대본: 예치 → 한도 → 하루치 → 상계 → 대사 → 확정 → 속이는 은행 (curl과 기대 숫자) |
 
@@ -21,8 +21,7 @@ src/clearing_hub/
 │   ├── auth.py             은행 인증(등록된 공개키로 Ed25519 검증, 이전 키 24시간), 관리자 토큰
 │   ├── bank_client.py      허브 → 은행 호출 (허브 키로 서명, 응답 서명 검증 필수, 타임아웃)
 │   ├── response_signing.py /v1 응답에 허브 응답 서명 (SPEC 2.5)
-│   ├── signature_doctor.py 서명 진단기 (규칙, LLM 없음): 실패한 서명을 흔한 실수 변형으로 다시 검증해 원인 가설 (SPEC 3.8)
-│   ├── llm.py              Gemini 호출 (연동 지원 설명에만, 읽기 전용. GEMINI_API_KEY 없거나 질문·코드가 없으면 안 부름)
+│   ├── signature_doctor.py 서명 진단기 (규칙): 실패한 서명을 흔한 실수 변형으로 다시 검증해 원인 가설 (SPEC 3.8)
 │   ├── alerts.py           관리자 알림 웹훅 (ALERT_WEBHOOK_URL)
 │   └── config.py, database.py, exceptions.py, exception_handlers.py, request_id.py
 ├── domains/
@@ -31,8 +30,8 @@ src/clearing_hub/
 │   ├── accounts/           본인 명의 계좌 조회 (/v1/accounts/lookup), account_ref, 조회 기록 (/admin/account-lookups)
 │   ├── inquiry/            수취 조회 중계 (/v1/inquiry)
 │   ├── reserve/            예치금 원장(모의 당좌예금): 내 예치금 (/v1/reserve), 입출금·정정·분개 (/admin/reserve)
-│   ├── support/            연동 지원: 인증 실패 기록 (failures.py, auth_failures), SPEC 발췌 (spec_search.py), 진단·LLM 설명
-│   │                       (/v1/diagnose, /v1/diagnose/failures — API 키만으로 식별, /admin/banks/{code}/diagnose·auth-failures)
+│   ├── support/            연동 진단: 인증 실패 기록 (failures.py, auth_failures), 규칙 진단·401 hint
+│   │                       (/v1/diagnose/failures — API 키만으로 식별, /admin/banks/{code}/auth-failures)
 │   ├── settlement/         정산 배치: 미정산 거래 수집·다자간 차액·쌍별 표·취소·CSV, 확정(예치금 반영) (/admin/settlements), 은행용 대사 파일 (/v1/settlements)
 │   └── transfers/          이체 접수(순채무한도 검사)·전달·상태 머신·결과 조회 (/v1/transfers), 관리 조회 (/admin/transfers),
 │                           증거 원문 보관 (evidence.py, /admin/transfers/{id}/evidence)
@@ -42,7 +41,7 @@ src/clearing_hub/
 src/bank_sim/main.py        가짜 은행 (SPEC 4·9.4절 참고 구현, 계좌번호 끝자리로 성공·실패·지연·속임 재현, 허브 공개키 검증, 응답 서명)
 tests/                      서명, 인증, 이체 성공·실패·멱등·타임아웃·재시도, 예치금·순채무한도·정산·대사 API,
                             시연 시나리오 전체 (test_demo_scenario.py = docs/DEMO.md), 부인방지 K1~K10 (test_nonrepudiation.py),
-                            셀프 등록·기본 한도·/v1/me (test_onboarding.py), 서명 진단기 (test_signature_doctor.py), 연동 지원 API (test_support.py)
+                            셀프 등록·기본 한도·/v1/me (test_onboarding.py), 서명 진단기 (test_signature_doctor.py), 연동 진단 API·401 hint (test_support.py)
 ```
 
 이체 상태: `ACCEPTED → DELIVERING → COMPLETED / FAILED / PENDING → (재시도) → COMPLETED / FAILED / UNKNOWN`

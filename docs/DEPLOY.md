@@ -174,12 +174,11 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping
 3. 재시작 뒤 확인: `curl -s $HUB/` → `"spec": "v1.1"`. 알림 시험은 아무 은행이나 `POST /v1/test-receive`로 5xx를 일으키기보다, 서버 안에서 `curl -s -X POST "$ALERT_WEBHOOK_URL" -H 'Content-Type: application/json' -d '{"text":"ClearingHub 알림 시험","content":"ClearingHub 알림 시험"}'`로 채널에 글이 오는지 본다
 4. 셀프 시험은 902(가짜 은행)의 순채무한도 안에서 돈다. 902는 셀프 시험마다 돈을 내므로, 알림 `sim_bank`(한도 부족)가 오면 `POST /admin/reserve/902/deposit`으로 예치금을 넣는다
 
-### 10단계 배포 (연동 지원 에이전트, SPEC v1.2)
+### 10단계 배포 (연동 진단, SPEC v1.2)
 
-1. 마이그레이션 `b7e3f1a9c2d4`(`auth_failures`, `diagnose_logs`)은 배포 때 자동으로 돈다 (기존 테이블은 그대로). 이미지에 `docs/SPEC.md`가 들어간다 (LLM 설명의 SPEC 발췌용, Dockerfile)
-2. LLM 설명을 쓰려면 서버 `.env`에 `GEMINI_API_KEY`를 넣는다 (AvengersBank와 같은 Gemini 키를 써도 된다). **없어도 된다**: 그러면 `POST /v1/diagnose`의 `explanation`이 `null`이고 규칙 진단(원인·고칠 곳·SPEC 절)만 나간다. 모델은 `DIAGNOSE_MODEL`(기본 `gemini-2.5-flash`). LLM은 은행이 `question`·`snippet`을 보냈을 때만 부른다. 401 본문의 `hint`(규칙 진단 한 줄)는 키와 상관없이 나간다
-3. 재시작 뒤 확인: `curl -s $HUB/` → `"spec": "v1.2"`. `curl -s $HUB/admin/banks/902/auth-failures -H "X-Admin-Token: $TOKEN"`이 `{"bank_code":"902","findings":[…]}`로 답한다
-4. 붙여 넣은 코드·질문은 외부 LLM API로 나간다 (키가 있을 때). 허브는 저장하지 않는다. 은행에는 비밀값을 지우고 붙이라고 SPEC 3.8에 적었다
+1. 마이그레이션 `b7e3f1a9c2d4`(`auth_failures`)은 배포 때 자동으로 돈다 (기존 테이블은 그대로). 새 설정은 없다
+2. 재시작 뒤 확인: `curl -s $HUB/` → `"spec": "v1.2"`. `curl -s $HUB/admin/banks/902/auth-failures -H "X-Admin-Token: $TOKEN"`이 `{"bank_code":"902","findings":[…]}`로 답한다
+3. API 키가 맞은 은행의 401 본문에 `hint`(규칙 진단 한 줄)가 붙는다. 은행은 `GET /v1/diagnose/failures`(서명 없이 API 키만)로 자세히 본다
 
 ## Ed25519 필수화 배포 순서 (8c, SPEC v1.0)
 
@@ -263,10 +262,6 @@ curl -s https://clearing-hub.ai-agent-develop.cloud/admin/transfers/<transfer_id
 | | `INVITE_TTL_DAYS` | `7`(기본). 초대 코드 유효 기간 |
 | | `BANK_CODE_START` | `903`(기본). 셀프 등록 때 이 코드부터 비어 있는 가장 작은 코드를 준다 |
 | | `DEFAULT_NET_DEBIT_CAP` | `1000000000`(기본, 10억). 새로 등록하는 은행의 순채무한도 |
-| | `GEMINI_API_KEY` | (선택) 연동 지원의 LLM 설명용 Gemini API 키 (SPEC 3.8). **비우면 LLM을 부르지 않고 규칙 진단만** 돌려준다. **비밀값이다** |
-| | `DIAGNOSE_MODEL`, `DIAGNOSE_MAX_TOKENS`, `DIAGNOSE_TIMEOUT_SECONDS` | `gemini-2.5-flash`, `2048`, `30`(초)(기본). 시간이 넘거나 API가 실패하면 규칙 진단만 |
-| | `DIAGNOSE_DAILY_LIMIT` | `50`(기본). 은행별 하루(KST) `POST /v1/diagnose` 횟수 (넘으면 429 `TOO_MANY_DIAGNOSES`. `GET /v1/diagnose/failures`는 제한 없음) |
-| | `SPEC_PATH` | `docs/SPEC.md`(기본, 작업 디렉터리 기준). LLM 설명에 넣을 SPEC 발췌의 원본. 없으면 발췌 없이 설명한다 |
 | | `HUB_PUBLIC_URL` | `https://clearing-hub.ai-agent-develop.cloud`. 초대 문구(`POST /admin/invites`의 `message`)에 넣을 허브 주소. 비어 있으면 그 관리자 요청의 주소가 들어간다 (서버 안에서 내부 주소로 부르면 내부 주소) |
 | `sim.env` | `SIM_SIGNING_KEY` | **필수.** 가짜 은행 Ed25519 개인키. `/interbank/*` 2xx·4xx 응답에 응답 서명. 공개키는 902에 등록한다. 없거나 틀리면 컨테이너가 시작하지 않는다 |
 | | `SIM_HUB_PUBLIC_KEY` | 허브 공개키 (`GET /v1/hub-key`). 허브 요청 검증. 비어 있으면 검증을 건너뛴다 (로컬 시험용) |

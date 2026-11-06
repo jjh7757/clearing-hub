@@ -1,13 +1,6 @@
-"""연동 지원 API 형식 (SPEC 3.8)."""
+"""연동 진단 API 형식 (SPEC 3.8)."""
 
-from pydantic import BaseModel, Field
-
-MAX_SNIPPET = 4000  # 붙여 넣은 코드: 이보다 길면 앞부분만 LLM에 넣는다 (422가 아니라 자른다)
-
-
-class DiagnoseRequest(BaseModel):
-    question: str | None = Field(default=None, max_length=1000)
-    snippet: str | None = Field(default=None, max_length=20000)  # 서명 코드 등. LLM에는 앞 4000자만
+from pydantic import BaseModel
 
 
 class HypothesisOut(BaseModel):
@@ -44,12 +37,4 @@ class Finding(BaseModel):
 
 class FailureList(BaseModel):
     bank_code: str
-    findings: list[Finding]
-
-
-class SupportAnswer(BaseModel):
-    bank_code: str
     findings: list[Finding]  # 규칙 진단 (실패별, 새것부터)
-    explanation: str | None  # LLM 설명 (키가 없거나 실패하면 null)
-    spec_refs: list[str]  # 근거로 넣은 SPEC 절
-    used_llm: bool

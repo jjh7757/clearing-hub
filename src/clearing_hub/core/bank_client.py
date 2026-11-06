@@ -172,7 +172,7 @@ class BankClient:
         exchange.response_headers = _pick(response.headers, REPLY_EVIDENCE_HEADERS)
         exchange.response_body = response.content
         signature_valid = None if response.status_code >= 500 else _check_reply_signature(bank, response, headers["X-Signature"])
-        # 은행이 401·403을 줬거나 응답 서명이 틀리면 연동 지원용으로 남긴다 (기다리지 않는다, domains/support/failures.py)
+        # 은행이 401·403을 줬거나 응답 서명이 틀리면 연동 진단용으로 남긴다 (기다리지 않는다, domains/support/failures.py)
         failures.record_reply(bank, BankReply(None, {}, signature_valid, exchange))
         if signature_valid is False:
             # 서명 없는·틀린 응답은 그 은행이 답했다고 증명할 수 없다. 2xx라도 입금 완료로 믿지 않는다 (12.4).

@@ -20,6 +20,7 @@ from clearing_hub.core.signing import (
     verify_response,
 )
 from clearing_hub.domains.banks.models import Bank
+from clearing_hub.domains.support import failures
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class Exchange:
     response_status: int | None = None
     response_headers: dict[str, str] = field(default_factory=dict)
     response_body: bytes = b""
+    url: str | None = None  # 실제로 부른 주소 (base_url + path). 인증 실패 기록용 (증거에는 남기지 않는다)
 
 
 @dataclass
@@ -155,7 +157,7 @@ class BankClient:
         request_id = request_id or get_request_id()
         if request_id:
             headers[REQUEST_ID_HEADER] = request_id
-        exchange = Exchange(method, path, _pick(headers, REQUEST_EVIDENCE_HEADERS), body, headers[ALG_HEADER])
+        exchange = Exchange(method, path, _pick(headers, REQUEST_EVIDENCE_HEADERS), body, headers[ALG_HEADER], url=url)
         timeout = get_settings().receiver_timeout_seconds
         try:
             # ASGITransport에는 httpx 타임아웃이 걸리지 않으므로 wait_for로 감싼다
@@ -170,6 +172,8 @@ class BankClient:
         exchange.response_headers = _pick(response.headers, REPLY_EVIDENCE_HEADERS)
         exchange.response_body = response.content
         signature_valid = None if response.status_code >= 500 else _check_reply_signature(bank, response, headers["X-Signature"])
+        # 은행이 401·403을 줬거나 응답 서명이 틀리면 연동 지원용으로 남긴다 (기다리지 않는다, domains/support/failures.py)
+        failures.record_reply(bank, BankReply(None, {}, signature_valid, exchange))
         if signature_valid is False:
             # 서명 없는·틀린 응답은 그 은행이 답했다고 증명할 수 없다. 2xx라도 입금 완료로 믿지 않는다 (12.4).
             # 5xx는 본문 보장이 없어(SPEC 5절) 서명을 요구하지 않고 그대로 5xx(재시도)로 본다

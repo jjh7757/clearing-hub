@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     default_net_debit_cap: int = Field(default=1_000_000_000, ge=0)  # 새 은행의 순채무한도(원). 등록 직후부터 보낼 수 있게
     # 은행이 부를 허브 주소 (초대 문구에 넣는다). 없으면 그 관리자 요청의 base URL. 프록시 뒤에서는 내부 주소가 나올 수 있어 운영에서는 넣는다
     hub_public_url: str | None = None
+    # 10단계 연동 지원 (SETTLEMENT_PLAN 14절, SPEC 3.8). 서명 진단은 규칙(core/signature_doctor.py)이 하고, LLM은 그 결과를
+    # 한국어로 설명만 한다 (읽기 전용). 키가 없으면 LLM 단계를 건너뛰고 규칙 결과만 돌려준다
+    anthropic_api_key: SecretStr | None = None
+    diagnose_model: str = "claude-sonnet-5-5"  # 설명용 모델 (core/llm.py). claude-api 스킬의 현재 Sonnet
+    diagnose_max_tokens: int = Field(default=8000, gt=0)
+    diagnose_timeout_seconds: float = Field(default=30, gt=0)  # 넘으면 규칙 결과만
+    diagnose_daily_limit: int = Field(default=50, gt=0)  # POST /v1/diagnose: 은행별 하루(settlement_timezone) 횟수
+    spec_path: str = "docs/SPEC.md"  # SPEC 발췌용 (작업 디렉터리 기준. 없으면 저장소 루트의 docs/SPEC.md)
 
     @field_validator("hub_signing_key", mode="before")
     @classmethod

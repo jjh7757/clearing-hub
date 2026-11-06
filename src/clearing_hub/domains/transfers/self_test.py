@@ -28,6 +28,7 @@ from clearing_hub.core.bank_client import BankClient, BankReply, bank_client, ob
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.exceptions import ApiException, Forbidden, NotFound
 from clearing_hub.domains.banks.models import Bank
+from clearing_hub.domains.support import service as support_service
 from clearing_hub.domains.transfers import evidence, service
 from clearing_hub.domains.transfers.models import Transfer, TransferStatus
 from clearing_hub.domains.transfers.schemas import TransferRequest
@@ -102,7 +103,7 @@ def reply_view(reply: BankReply | None) -> dict:
     return {"reachable": status is not None, "status": status, "body": body, "signature_valid": reply.signature_valid}
 
 
-def _alert_if_broken(bank_code: str, transfer_id: str, what: str, reply: BankReply) -> None:
+def _alert_if_broken(bank: Bank, transfer_id: str, what: str, reply: BankReply) -> None:
     """은행이 5xx를 주거나 응답 서명이 틀리면 관리자에게 알린다 (그 은행으로 가는 실제 이체도 PENDING이 될 상태다)."""
     status, _ = observed(reply)
     if reply.signature_valid is False:
@@ -111,8 +112,10 @@ def _alert_if_broken(bank_code: str, transfer_id: str, what: str, reply: BankRep
         problem = f"HTTP {status}"
     else:
         return
-    alerts.notify("self_test", f"셀프 시험: 은행 {bank_code}의 {what}가 {problem}로 답했습니다. "
-                  "그 은행으로 가는 이체가 PENDING이 될 수 있습니다", bank_code=bank_code, transfer_id=transfer_id)
+    hint = support_service.reply_hint(bank, reply)  # 규칙 진단 1순위 가설 한 줄 (LLM 없음)
+    alerts.notify("self_test", f"셀프 시험: 은행 {bank.bank_code}의 {what}가 {problem}로 답했습니다. "
+                  "그 은행으로 가는 이체가 PENDING이 될 수 있습니다" + (f"\n{hint}" if hint else ""),
+                  bank_code=bank.bank_code, transfer_id=transfer_id)
 
 
 async def send(db: AsyncSession, bank: Bank, to_account: str, amount: int,
@@ -140,7 +143,7 @@ async def send(db: AsyncSession, bank: Bank, to_account: str, amount: int,
     logger.info("셀프 시험 이체 %s → 은행 %s: %s", transfer.transfer_id, bank.bank_code, transfer.status,
                 extra={"transfer_id": transfer.transfer_id, "bank_code": bank.bank_code})
     if capturing.reply is not None:
-        _alert_if_broken(bank.bank_code, transfer.transfer_id, "/receive", capturing.reply)
+        _alert_if_broken(bank, transfer.transfer_id, "/receive", capturing.reply)
     return transfer, capturing.reply
 
 
@@ -169,7 +172,7 @@ async def resend(db: AsyncSession, bank: Bank, transfer_id: str,
     await db.commit()
     logger.info("셀프 시험 재전송 %s → 은행 %s: HTTP %s", transfer_id, bank.bank_code, observed(reply)[0],
                 extra={"transfer_id": transfer_id, "bank_code": bank.bank_code})
-    _alert_if_broken(bank.bank_code, transfer_id, "/receive 재전송", reply)
+    _alert_if_broken(bank, transfer_id, "/receive 재전송", reply)
     return transfer, reply
 
 
@@ -180,5 +183,5 @@ async def status(db: AsyncSession, bank: Bank, transfer_id: str,
     reply = await client.receive_status(bank, transfer_id, transfer.request_id)
     evidence.record_exchange(db, transfer.transfer_id, reply)
     await db.commit()
-    _alert_if_broken(bank.bank_code, transfer_id, "/receive/{transfer_id}", reply)
+    _alert_if_broken(bank, transfer_id, "/receive/{transfer_id}", reply)
     return transfer, reply

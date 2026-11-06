@@ -1,4 +1,4 @@
-"""요청 인증 의존성: 참가 은행(Ed25519 서명), 관리자(토큰)."""
+"""요청 인증 의존성: 참가 은행(Ed25519 서명), 연동 지원용 은행 식별(API 키만, SPEC 3.8), 관리자(토큰)."""
 
 import hmac
 from dataclasses import dataclass
@@ -13,6 +13,7 @@ from clearing_hub.core.exceptions import Unauthorized
 from clearing_hub.core.signing import ALG_ED25519, ALG_HEADER, hash_api_key, verify_ed25519
 from clearing_hub.domains.banks import service as bank_service
 from clearing_hub.domains.banks.models import Bank
+from clearing_hub.domains.support import failures
 
 
 @dataclass
@@ -38,12 +39,29 @@ async def current_bank(
     """X-Bank-Code·X-Api-Key로 은행을 찾고(식별), 등록된 Ed25519 공개키로 서명을 검증한다(인증, SPEC 2).
 
     공개키는 현재 키와, 교체 뒤 24시간 안의 이전 키다. `X-Signature-Alg`는 `ed25519`이거나 없어야 한다 (없으면 ed25519).
-    허브는 은행의 비밀을 갖지 않으므로, 허브 DB가 통째로 새도 이 검증을 통과하는 요청은 만들 수 없다."""
+    허브는 은행의 비밀을 갖지 않으므로, 허브 DB가 통째로 새도 이 검증을 통과하는 요청은 만들 수 없다.
+
+    401을 낼 때마다 `auth_failures`에 한 건 남긴다 (연동 지원, SPEC 3.8). API 키가 맞은 은행이면 그 코드로 남겨
+    은행이 `GET /v1/diagnose/failures`로 스스로 보고, 키가 틀리면 은행을 모르므로 bank_code 없이 남긴다."""
+    identified: list[str] = []  # API 키가 맞은 은행 코드 (아래 _authenticate가 넣는다)
+    try:
+        return await _authenticate(request, db, identified, x_bank_code, x_api_key, x_timestamp, x_signature,
+                                   x_signature_alg)
+    except Unauthorized as exc:
+        await failures.record_bank_to_hub(request, exc.code, exc.message, identified[0] if identified else None)
+        raise
+
+
+async def _authenticate(
+    request: Request, db: AsyncSession, identified: list[str], x_bank_code: str | None, x_api_key: str | None,
+    x_timestamp: str | None, x_signature: str | None, x_signature_alg: str | None,
+) -> Bank:
     if not (x_bank_code and x_api_key and x_timestamp and x_signature):
         raise Unauthorized(message="인증 헤더가 없습니다")
     bank = await bank_service.get_bank(db, x_bank_code)
     if bank is None or not hmac.compare_digest(bank.api_key_hash, hash_api_key(x_api_key)):
         raise Unauthorized(message="은행 코드 또는 API 키가 맞지 않습니다")
+    identified.append(bank.bank_code)
     if not bank.active:
         raise Unauthorized(code="BANK_INACTIVE", message="비활성 은행입니다")
     alg = (x_signature_alg or ALG_ED25519).strip().lower()
@@ -65,6 +83,22 @@ async def current_bank(
     if x_signature_alg:
         headers[ALG_HEADER] = x_signature_alg
     request.state.verified = VerifiedRequest(request.method, path, headers, body, alg)
+    return bank
+
+
+async def identified_bank(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    x_bank_code: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header()] = None,
+) -> Bank:
+    """서명 없이 X-Bank-Code·X-Api-Key만으로 은행을 찾는다 (연동 지원 API, SPEC 3.8). 서명이 안 되는 상태에서 원인을
+    찾으려고 부르는 읽기 전용 API에만 쓴다 (돈·등록 정보를 바꾸는 API에는 쓰지 않는다). 비활성 은행도 자기 실패는 본다.
+    이 의존성의 401은 auth_failures에 남기지 않는다 (서명 검증을 하지 않았으므로 진단할 것이 없다)."""
+    if not (x_bank_code and x_api_key):
+        raise Unauthorized(message="X-Bank-Code와 X-Api-Key가 필요합니다")
+    bank = await bank_service.get_bank(db, x_bank_code)
+    if bank is None or not hmac.compare_digest(bank.api_key_hash, hash_api_key(x_api_key)):
+        raise Unauthorized(message="은행 코드 또는 API 키가 맞지 않습니다")
     return bank
 
 

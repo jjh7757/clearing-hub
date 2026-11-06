@@ -21,6 +21,9 @@ from clearing_hub.domains.reserve.router import admin_router as reserve_admin_ro
 from clearing_hub.domains.reserve.router import router as reserve_router
 from clearing_hub.domains.settlement.router import admin_router as settlement_admin_router
 from clearing_hub.domains.settlement.router import router as settlement_router
+from clearing_hub.domains.support import failures as auth_failures
+from clearing_hub.domains.support.router import admin_router as support_admin_router
+from clearing_hub.domains.support.router import router as support_router
 from clearing_hub.domains.transfers.router import admin_router as transfer_admin_router
 from clearing_hub.domains.transfers.router import router as transfer_router
 from clearing_hub.domains.transfers.router import self_test_router
@@ -42,6 +45,7 @@ async def lifespan(app: FastAPI):
             with suppress(asyncio.CancelledError):
                 await task
         await alerts.drain()  # 보내는 중인 알림을 잠깐(최대 5초) 기다린다
+        await auth_failures.drain()  # 쓰는 중인 인증 실패 기록 (engine을 닫기 전에)
         await engine.dispose()
 
 
@@ -65,14 +69,16 @@ app.include_router(self_test_router)
 app.include_router(account_router)
 app.include_router(reserve_router)
 app.include_router(settlement_router)
+app.include_router(support_router)
 app.include_router(bank_admin_router)
 app.include_router(invite_admin_router)
 app.include_router(transfer_admin_router)
 app.include_router(account_admin_router)
 app.include_router(reserve_admin_router)
 app.include_router(settlement_admin_router)
+app.include_router(support_admin_router)
 
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v1.1"}  # docs/SPEC.md 버전과 맞춘다
+    return {"service": "ClearingHub", "spec": "v1.2"}  # docs/SPEC.md 버전과 맞춘다

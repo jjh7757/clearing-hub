@@ -10,6 +10,7 @@ os.environ["RETRY_MAX_COUNT"] = "3"
 os.environ["SETTLEMENT_WORKER_ENABLED"] = "false"  # 테스트 DB에 run을 만들지 않게. 워커 함수는 테스트가 직접 부른다
 os.environ["SIM_DELAY_SECONDS"] = "1"  # 허브 타임아웃(0.3초)보다 길게
 os.environ["ALERT_WEBHOOK_URL"] = ""  # 로컬 .env에 웹훅이 있어도 테스트는 보내지 않는다. 알림 시험은 alert_sink 픽스처로
+os.environ["ANTHROPIC_API_KEY"] = ""  # 로컬 .env에 키가 있어도 테스트는 실제 LLM을 부르지 않는다 (llm.complete를 바꿔 끼운다)
 
 from clearing_hub.core.signing import generate_keypair, public_key_of, sign_ed25519  # noqa: E402
 

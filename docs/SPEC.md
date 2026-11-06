@@ -1,8 +1,8 @@
-# ClearingHub 참가 은행 연동 규격 v1.1 (초안)
+# ClearingHub 참가 은행 연동 규격 v1.2 (초안)
 
 - 작성일: 2026-11-05 (최종 수정 2026-11-06)
 - 대상: ClearingHub(은행 간 이체 중계 서버)에 참가하려는 은행 서버 개발팀
-- 상태: **v1.1 초안**. 서명은 Ed25519 하나다(2절, 요청·응답 모두). 참가는 초대 코드로 셀프 등록하고(3.5, 7절), 받는 쪽은 셀프 시험으로 확인한다(3.7). 정산은 은행의 확인(ack)으로 자동 확정된다(10.8). 다른 팀이 연동을 시작하기 전에 확정한다
+- 상태: **v1.2 초안**. 서명은 Ed25519 하나다(2절, 요청·응답 모두). 참가는 초대 코드로 셀프 등록하고(3.5, 7절), 받는 쪽은 셀프 시험으로 확인한다(3.7). 정산은 은행의 확인(ack)으로 자동 확정된다(10.8). 401로 막히면 서명 진단 API로 원인을 본다(3.8). 다른 팀이 연동을 시작하기 전에 확정한다
 - 배경·전체 설계: [PROJECT_PLAN.md](PROJECT_PLAN.md) (허브 저장소 안의 문서. 이 문서만 받았다면 읽지 않아도 연동에 지장이 없다)
 
 이 문서는 두 가지를 정한다.
@@ -55,6 +55,7 @@
 - [ ] 서명된 요청·응답 원문(바이트·헤더)을 이체 관련 호출만이라도 보관한다 (2.5)
 - [ ] 7절 6의 시험 순서를 가짜 은행 `902`로 모두 해 봤다 (보내는 쪽)
 - [ ] 7절 7의 받는 쪽 시험을 셀프 시험 API(`POST /v1/test-receive`, `/resend`, `/status`)로 모두 해 봤다 (3.7)
+- [ ] 401이 나면 `GET /v1/diagnose/failures`(서명 없이 `X-Bank-Code`·`X-Api-Key`)로 원인 가설을 먼저 본다. ping·셀프 시험이 실패할 때도 같다 (3.8)
 
 ---
 
@@ -373,6 +374,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `POST /v1/inquiry` 수취 조회 | 서명 | 3.2 |
 | `POST /v1/transfers`, `GET /v1/transfers/{transfer_id}` 이체·결과 조회 | 서명 | 3.3, 3.4 |
 | `POST /v1/test-receive`, `POST /v1/test-receive/{transfer_id}/resend`, `GET /v1/test-receive/{transfer_id}/status` 셀프 시험 (받는 쪽) | 서명 | 3.7 |
+| `GET /v1/diagnose/failures`, `POST /v1/diagnose` 연동 지원: 내 인증 실패와 원인 진단 (읽기 전용) | **API 키만** (서명 없음) | 3.8 |
 | `POST /v1/accounts/lookup` 본인 계좌 조회 (선택) | 서명 | 9.2 |
 | `GET /v1/reserve` 예치금 | 서명 | 10.2 |
 | `GET /v1/settlements`, `GET /v1/settlements/{run_id}` 정산 | 서명 | 10.4, 10.5 |
@@ -699,6 +701,90 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `FORBIDDEN` | 403 | `resend`·`status`: 내 은행으로 간 셀프 시험 거래가 아님 |
 | `TRANSFER_NOT_COMPLETED` | 409 | `resend`: 그 거래가 `COMPLETED`가 아님 |
 
+### 3.8 연동 지원 (서명 진단) `GET /v1/diagnose/failures`, `POST /v1/diagnose`
+
+**인증 방식이 다르다: 서명 없이 `X-Bank-Code` + `X-Api-Key`만으로 식별한다.** 서명이 맞지 않아 401로 막힌 상태에서 원인을 보려고 부르는 API이기 때문이다. 두 API 모두 **읽기 전용**이고(아무것도 바꾸지 않는다), **내 은행으로 식별된 실패만** 보여 준다. 응답에는 허브 응답 서명(2.5)이 붙는다 (요청에 서명이 없으므로 `request_signature`는 `""`).
+
+허브는 인증 실패를 은행별로 최근 200건 남긴다.
+
+| 방향 (`direction`) | 남는 경우 |
+|---|---|
+| `BANK_TO_HUB` | 내 요청을 허브가 401로 거절 (`UNAUTHORIZED`·`SIGNATURE_INVALID`·`SIGNATURE_EXPIRED`·`BANK_INACTIVE`). 단 `X-Api-Key`가 맞았을 때만 내 실패로 남는다. 키가 틀린 요청은 누구의 것인지 모르므로 은행은 볼 수 없다 (허브 관리자에게 문의) |
+| `HUB_TO_BANK` | 허브가 내 4절·9.4 API를 불렀는데 내 서버가 401·403을 줬거나, 내 응답 서명(2.5)이 없거나 틀림. 허브가 보낸 헤더·경로·본문과 내 서버가 준 상태·서명 헤더·본문 |
+
+허브는 `X-Api-Key` 값을 저장하지 않는다. 요청 본문은 64KB까지 남긴다.
+
+**진단은 규칙으로 한다.** 허브는 실패한 요청의 서명을 흔한 실수 변형(아래 표)으로 **다시 계산해 내 공개키로 실제로 검증**해 보고, 맞는 변형을 원인으로 낸다. 이때 가설의 `verified`가 `true`다 (추측이 아니라 확인된 원인). 맞는 변형이 없으면 "다른 키로 서명", "메시지 구성이 전혀 다름"을 `verified: false`로 낸다.
+
+| 다시 계산해 보는 실수 | 가설 `code` |
+|---|---|
+| `PATH`에 `/v1` 빠짐, 전체 URL, 쿼리스트링, 끝 `/`, 은행 쪽 접두사(`/interbank` 등) | `PATH_WITHOUT_V1`, `PATH_FULL_URL`, `PATH_WITH_QUERY`, `PATH_TRAILING_SLASH`, `PATH_BANK_PREFIX` |
+| 본문을 다시 직렬화해 서명 (`json.dumps` 기본값, 한글 `\uXXXX`, 공백, 키 정렬), 본문이 있는데 `""`로 서명, 본문 없는 요청을 `{}`로 서명 | `BODY_DEFAULT_DUMPS`, `BODY_ENSURE_ASCII`, `BODY_SPACES`, `BODY_SORTED_KEYS`, `BODY_EMPTY_SIGNED`, `BODY_SIGNED_NONEMPTY` |
+| 경로 뒤 `\n` 누락, `\r\n`, 메서드 소문자 | `NO_TRAILING_NEWLINE`, `CRLF`, `METHOD_LOWERCASE` |
+| 서명을 hex·URL-safe base64·패딩 없이 보냄, 64바이트 서명이 아님 | `SIGNATURE_HEX`, `SIGNATURE_BASE64URL`, `SIGNATURE_NO_PADDING`, `SIGNATURE_FORMAT` |
+| 교체 전(만료된) 키로 서명 | `OLD_KEY_EXPIRED` |
+| 시계 차이(초), 밀리초 타임스탬프 (`SIGNATURE_EXPIRED`) | `CLOCK_SKEW`, `TIMESTAMP_MILLIS` |
+| 내 응답 서명: 요청 `X-Signature`를 빼고 서명, STATUS가 다름, 본문을 다시 직렬화, 헤더 없음 | `RESPONSE_NO_REQUEST_SIGNATURE`, `RESPONSE_STATUS_MISMATCH`, `RESPONSE_BODY_REDUMPED`, `RESPONSE_SIGNATURE_MISSING` |
+| 내 서버가 허브 요청을 401로 거절 (검증 쪽은 허브가 다시 계산할 수 없다) | `BANK_VERIFY_PATH`(PATH는 `base_url` 뒤 부분), `BANK_VERIFY_HUB_KEY`, `BANK_VERIFY_RAW_BODY`, `BANK_CLOCK` (모두 `verified: false`) |
+
+**`GET /v1/diagnose/failures`** — 내 최근 실패 20건과 규칙 진단 (횟수 제한 없음, 빠름). **401이 나면 먼저 이것을 본다.**
+
+응답 `200`
+```json
+{
+  "bank_code": "903",
+  "findings": [
+    {
+      "failure": { "failure_id": 41, "direction": "BANK_TO_HUB", "reason": "SIGNATURE_INVALID", "message": "서명이 맞지 않습니다",
+                   "method": "POST", "path": "/v1/transfers",
+                   "headers": { "X-Bank-Code": "903", "X-Timestamp": "1762300800", "X-Signature": "…", "X-Signature-Alg": "ed25519" },
+                   "body_preview": "{\"transfer_id\":…", "body_length": 190, "http_status": null, "response_headers": null,
+                   "response_body_preview": null, "created_at": "2026-11-06T03:00:00Z" },
+      "hypotheses": [
+        { "code": "PATH_WITHOUT_V1", "title": "서명 PATH에 `/v1`이 빠짐",
+          "detail": "허브는 `/v1/transfers`로 검증했고, 서명은 `/transfers`로 만들었다", "spec_ref": "2.2",
+          "fix": "서명 PATH는 `/v1`부터 넣는다(`/v1/transfers`). 2.3의 `sign_request`에 넘기는 path를 확인", "verified": true }
+      ]
+    }
+  ]
+}
+```
+
+| 필드 | 설명 |
+|---|---|
+| `failure` | 실패 한 건. `body_preview`·`response_body_preview`는 앞 500자. `HUB_TO_BANK`면 `headers`가 허브가 보낸 헤더, `http_status`·`response_headers`가 내 서버의 응답 |
+| `hypotheses` | 원인 가설, **앞이 1순위**. `spec_ref`는 이 문서의 절, `fix`는 고치는 방법 한 줄 |
+
+**`POST /v1/diagnose`** — 위 진단(최근 10건)에 한국어 설명을 붙인다. 하루(KST) **50번**까지.
+
+```json
+{ "question": "POST /v1/transfers만 401이 나요", "snippet": "def sign(...):\n    ..." }
+```
+
+| 필드 | 타입 | 필수 | 규칙 |
+|---|---|---|---|
+| `question` | 문자열 | 선택 | 1000자까지 |
+| `snippet` | 문자열 | 선택 | 서명 코드 등. 20000자까지 받고 설명에는 앞 4000자만 쓴다. **개인키·API 키는 지우고 붙인다** |
+
+응답 `200`
+```json
+{ "bank_code": "903", "findings": [ … ], "explanation": "원인: …\n고칠 곳: …\nSPEC: 2.2\n확인 방법: …",
+  "spec_refs": ["2.2", "2.3"], "used_llm": true }
+```
+
+- `findings`는 `GET /v1/diagnose/failures`와 같은 형식이다. **원인 판단은 이것이 근거다.**
+- `explanation`은 허브가 LLM(Claude)으로 진단 결과·이 문서의 해당 절(`spec_refs`)·붙여 넣은 코드를 이어 쓴 설명이다. 새 규칙을 만들지 않고 진단과 이 문서만 근거로 쓰게 했지만, 설명과 이 문서가 다르면 **이 문서가 맞다**. 허브에 LLM 설정이 없거나 실패하면 `null`이고 `used_llm`이 `false`다 (규칙 진단은 그대로 온다).
+- 붙여 넣은 `question`·`snippet`은 설명을 만드는 데만 쓰고 허브에 저장하지 않는다. 외부 LLM API로 전송되므로 비밀값을 넣지 않는다.
+- 돈이 움직이는 기능(이체·정산·예치금)과 등록 정보 변경에는 LLM을 쓰지 않는다 (6절). 이 API도 읽기만 한다.
+
+오류
+
+| 코드 | HTTP | 경우 |
+|---|---|---|
+| `UNAUTHORIZED` | 401 | `X-Bank-Code`·`X-Api-Key`가 없거나 맞지 않음 (이 401은 실패 기록에 남지 않는다) |
+| `VALIDATION_ERROR` | 422 | 위 필드 표 위반 |
+| `TOO_MANY_DIAGNOSES` | 429 | `POST /v1/diagnose` 하루 횟수 초과. `GET /v1/diagnose/failures`는 계속 쓸 수 있다 |
+
 ---
 
 ## 4. 허브 → 은행 API (은행이 구현할 것)
@@ -818,6 +904,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | `TOO_MANY_TESTS` | 429 | 셀프 시험 하루 횟수 초과 (3.7) | 허브 |
 | `SIM_BANK_UNAVAILABLE` | 503 | 셀프 시험에 쓸 가짜 은행을 지금 쓸 수 없음 (3.7) | 허브 |
 | `TRANSFER_NOT_COMPLETED` | 409 | 셀프 시험 재전송(`resend`)을 `COMPLETED`가 아닌 거래에 요청 (3.7) | 허브 |
+| `TOO_MANY_DIAGNOSES` | 429 | 연동 지원 진단(`POST /v1/diagnose`) 하루 횟수 초과 (3.8) | 허브 |
 | `PUBLIC_KEY_MISSING` | 400 | 받는 은행의 공개키가 허브에 없음. 수취 조회·이체 모두 접수 전에 거절(이체는 `status: "FAILED"`)한다. 허브가 그 은행의 응답 서명을 검증할 수 없기 때문이다 (2.5). v1.0 전에 등록된 은행에만 생긴다 | 허브 |
 | `INVITE_INVALID` | 400 | 셀프 등록의 초대 코드가 없거나 만료됐거나 이미 쓰임 (3.5) | 허브 |
 | `BANK_EXISTS` | 409 | 같은 `base_url`로 등록된 은행이 이미 있음 (3.5) | 허브 |
@@ -881,7 +968,8 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
    | 입금 후 응답 지연 흉내 (입금을 커밋한 뒤 일부러 5초 넘게 늦게 답함) | `POST /v1/test-receive` | `202 PENDING`. 1분쯤 뒤 `/status`의 `hub_status`가 `COMPLETED`(허브가 4.3으로 확인해 맞춤). 입금은 1번 |
 
    **동시 중복 요청은 허브로 일으킬 수 없다.** 같은 `transfer_id`가 **동시에** 두 번 오는 경우(4.2 규칙 2)는 은행이 **자기 시험 환경에서** 직접 시험한다: 허브 공개키 설정을 2.3의 예시 허브 키로 바꾸고, 예시 허브 개인키로 `X-Bank-Code: "000"` 요청에 서명해(2.3) 새 `transfer_id`로 같은 본문을 `/receive`에 두 번 **동시에** 보내 입금이 1번이고, 두 응답이 `200` 또는 `5xx`이며 **4xx는 하나도 없는지** 확인한다. 운영 설정에는 예시 키를 넣지 않는다.
-8. **참고 구현**: 이 문서의 2.3·2.5(서명)와 9.1(가상 CI) 코드만으로 충분하다. 허브 저장소를 받았다면 [`src/bank_sim/main.py`](../src/bank_sim/main.py)(4절·9.4 API를 구현한 가짜 은행)와 [`src/clearing_hub/core/signing.py`](../src/clearing_hub/core/signing.py)도 볼 수 있다. `bank_sim`은 허브 패키지의 `signing`·`response_signing`을 import하므로, 따로 가져갈 때는 2.3·2.5의 참고 구현으로 바꾼다.
+8. **401이 나면** (어느 단계에서든): 허브 관리자에게 묻기 전에 `GET /v1/diagnose/failures`를 서명 없이 `X-Bank-Code`·`X-Api-Key`로 부른다 (3.8). 허브가 실패한 요청을 흔한 실수 변형으로 다시 계산해, 맞는 변형(`verified: true`)을 1순위 가설로 보여 준다. ping(3.6)·셀프 시험(3.7)이 내 서버의 401·응답 서명 문제로 실패한 것도 여기에 나온다. 설명이 더 필요하면 `POST /v1/diagnose`에 질문과 서명 코드를 붙인다 (비밀값은 지운다). 가설이 `API_KEY_MISMATCH`이거나 이 API 자체가 401이면 API 키가 틀린 것이니 허브 관리자에게 문의한다.
+9. **참고 구현**: 이 문서의 2.3·2.5(서명)와 9.1(가상 CI) 코드만으로 충분하다. 허브 저장소를 받았다면 [`src/bank_sim/main.py`](../src/bank_sim/main.py)(4절·9.4 API를 구현한 가짜 은행)와 [`src/clearing_hub/core/signing.py`](../src/clearing_hub/core/signing.py)도 볼 수 있다. `bank_sim`은 허브 패키지의 `signing`·`response_signing`을 import하므로, 따로 가져갈 때는 2.3·2.5의 참고 구현으로 바꾼다.
 
 허브 관리자가 직접 등록할 수도 있다 (관리자 API `POST /admin/banks`, 코드를 정해서. 시연용 은행 등). 그때도 공개키는 은행이 만들어 준다.
 
@@ -912,6 +1000,7 @@ def verify_response(public_key_b64: str, ts: str, status: int, request_signature
 | 19 | 서명 방식 (2절) | 은행별 `hmac` → `both` → `ed25519` 전환 / Ed25519만 | 확정 (v1.0): **Ed25519만.** 연동을 시작한 다른 팀이 없어 전환 기간을 두지 않는다. 허브가 은행의 비밀을 갖지 않고, 은행은 처음부터 하나만 만든다. HMAC·서명 모드는 규격에서 뺐다 |
 | 20 | 셀프 등록·기본 한도 (3.5, 10.2) | 관리자가 은행마다 등록·키 발급·한도 입력 / 초대 코드로 은행이 스스로 | 확정 (v1.0): 관리자는 초대 코드(7일, 한 번)와 허브 공개키 지문만 보낸다. 은행이 `POST /v1/banks/register`로 등록하고 `/v1/me`로 주소를 고친다. 기본 한도 10억. 정산 자동 확정·은행 셀프 시험은 v1.1(8절 21) |
 | 21 | 관리자 손 줄이기 (3.7, 10.8) | 관리자가 매일 확정하고 받는 쪽 시험 이체를 보내 줌 / 은행이 스스로 | 확정 (v1.1): 은행이 대사 결과를 ack·dispute로 보내 자동 확정(전원 ack 즉시, 09:00 KST 마감, dispute는 관리자 판정). 받는 쪽은 셀프 시험 API로 은행이 직접. 허브 관리자는 알림(dispute·`OVERDUE`·`UNKNOWN`·ping 실패 등)을 받고 대응한다 |
+| 22 | 연동 지원 (3.8) | 401 문의마다 관리자가 은행의 서명 코드를 같이 봄 / 허브가 실패를 기록해 원인을 진단 | 확정 (v1.2): 허브가 인증 실패를 기록하고 **규칙으로** 서명을 다시 계산해 원인을 찾는다. LLM은 그 결과를 설명만 한다 (읽기 전용, 설정이 없으면 규칙 결과만). 서명이 안 되는 상태에서 쓰므로 API 키만으로 식별하고 자기 실패만 보여 준다 |
 
 ---
 
@@ -1423,3 +1512,4 @@ dispute가 있으면   → 자동 확정하지 않는다. 허브 관리자가 �
 | 0.6.1 | 2026-11-06 | 문서·가짜 은행만 (허브 동작과 은행 연동 방식은 그대로). 7절 5: 가짜 은행 `902`에 대사 시연용 계좌 `…0006`(입금하지 않고 `200 COMPLETED`로 답함) 추가. 허브 루트 `/` 응답의 `spec`을 `v0.6.1`로 |
 | 1.0 (초안) | 2026-11-06 | **서명은 Ed25519 하나 (HMAC 삭제), 셀프 등록, 기본 한도.** 같은 날 먼저 쓴 1.0 초안(HMAC과 Ed25519를 은행별 서명 모드 `hmac`·`both`·`ed25519`로 함께 쓰는 판)을 다른 팀이 연동을 시작하기 전에 고쳐 썼다. HMAC secret·서명 모드·전환 순서·`HUB_KEY_MISSING`을 뺐다 (허브가 은행의 비밀을 갖지 않는다). 1절 인증 줄. 2절 전체를 Ed25519 전용으로: 2.1 `X-Signature-Alg: ed25519`(생략 가능), 2.2 메시지(v0.5와 같다), 2.3 예시용 키 쌍과 예시 1·2, 참고 구현, 2.5 응답 서명 **필수**(예시 3, 검증 실패는 "응답 없음"), 2.6 키 만들기 → 지문 → 등록 → 허브 공개키 → 회전(옛 키 24시간). 3절 머리에 API 표, 새 3.5 셀프 등록 `POST /v1/banks/register`(초대 코드, 코드 자동 배정, ping 결과), 새 3.6 `GET`·`PATCH /v1/me`, `POST /v1/me/ping`(ping 결과 표). 4절 머리말. 5절 `PUBLIC_KEY_MISSING`·`INVITE_INVALID`·`BANK_EXISTS`·`BANK_CODE_EXHAUSTED`·`PING_FAILED`. 7절을 셀프 등록 기준으로 다시 씀. 8절 1·3·13·17·18·19 갱신, 20 추가. 10.2 순채무한도 기본 10억(등록 직후부터 송금 가능). 10.7. 체크리스트. 루트 `/` 응답 `v1.0` |
 | 1.1 (초안) | 2026-11-06 | **관리자 손 줄이기** (1.0과 호환: 은행 → 허브 API만 더했다. 4절은 그대로). 새 3.7 셀프 시험 `POST /v1/test-receive`(허브가 가짜 은행 `902` 명의로 내 은행에 시험 이체, 응답에 `receiver_reply`), `/resend`(같은 `transfer_id` 재전송으로 멱등 시험), `/status`(4.3 확인). 새 10.8 `POST /v1/settlements/{run_id}/ack`·`/dispute`: 포지션이 있는 은행이 모두 ack하면 즉시 확정, 아니면 09:00 KST에 dispute가 없으면 자동 확정, dispute면 허브 관리자 판정(알림 자동). 10.4·10.5에 `my_ack`. 10.1·10.3·10.6·10.7을 자동 확정 기준으로 고침. 7절 7을 셀프 시험으로 다시 씀(관리자 요청 삭제). 5절 `SETTLEMENT_NOT_DRAFT`·`TOO_MANY_TESTS`·`SIM_BANK_UNAVAILABLE`·`TRANSFER_NOT_COMPLETED`. 8절 8·20 갱신, 21 추가. 체크리스트. 루트 `/` 응답 `v1.1` |
+| 1.2 (초안) | 2026-11-06 | **연동 지원** (1.1과 호환: 은행 → 허브 API만 더했다. 서명·4절은 그대로). 새 3.8 `GET /v1/diagnose/failures`·`POST /v1/diagnose`: 서명 없이 `X-Bank-Code`·`X-Api-Key`로 식별, 읽기 전용, 내 실패만. 허브가 인증 실패(내 요청의 401, 내 서버의 401·403·응답 서명 오류)를 기록하고, 실패한 서명을 흔한 실수 변형으로 다시 계산해 원인 가설(`verified`, `spec_ref`, `fix`)을 준다. `POST /v1/diagnose`는 LLM 설명(`explanation`, 없으면 `null`)을 붙인다, 하루 50번. 3절 API 표, 5절 `TOO_MANY_DIAGNOSES`, 7절 8(401이 나면), 8절 22, 체크리스트. 루트 `/` 응답 `v1.2` |

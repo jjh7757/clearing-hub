@@ -9,13 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from clearing_hub.core.auth import current_bank, require_admin
 from clearing_hub.core import alerts
-from clearing_hub.core.bank_client import bank_client, observed
+from clearing_hub.core.bank_client import BankReply, bank_client, observed
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.database import get_db
 from clearing_hub.core.exceptions import ApiException
 from clearing_hub.core.signing import fingerprint, public_key_of
 from clearing_hub.domains.banks import service
 from clearing_hub.domains.banks.models import Bank, Invite
+from clearing_hub.domains.support import service as support_service
 from clearing_hub.domains.banks.schemas import (
     BankAdmin, BankCreate, BankCredentials, BankList, BankMe, BankPublic, BankRegister, BankRegistered, BankUpdate, HubKey,
     InviteAdmin, InviteCreate, InviteIssued, KeyStatus, MeUpdate, PingResult, PublicKeyIn,
@@ -35,6 +36,10 @@ PING_ACCOUNT = "000-000-000000"  # 연결 확인용 없는 계좌 (SPEC 3.6)
 # ---- 연결 확인 (ping) ----
 
 async def ping_bank(bank: Bank, base_url: str | None = None) -> PingResult:
+    return (await _ping(bank, base_url))[0]
+
+
+async def _ping(bank: Bank, base_url: str | None = None) -> tuple[PingResult, BankReply]:
     """{base_url}/inquiry를 없는 계좌로 불러 본다 (SPEC 3.6). 허브 키로 서명하고, 은행의 응답 서명을 검증한다.
 
     정상(ok)은 응답 서명이 맞고 status가 200 또는 404 ACCOUNT_NOT_FOUND일 때다. 응답 서명이 틀리면 BankReply는
@@ -44,7 +49,13 @@ async def ping_bank(bank: Bank, base_url: str | None = None) -> PingResult:
     ok = reply.signature_valid is True and (
         status == 200 or (status == 404 and body.get("error") == "ACCOUNT_NOT_FOUND"))
     return PingResult(ok=ok, reachable=status is not None, status=status, body=body,
-                      response_signature_valid=reply.signature_valid)
+                      response_signature_valid=reply.signature_valid), reply
+
+
+def _hint(bank: Bank, reply: BankReply) -> str:
+    """알림 둘째 문장: 규칙 진단 1순위 가설 한 줄 (LLM 없음, SETTLEMENT_PLAN 14절). 없으면 빈 문자열."""
+    hint = support_service.reply_hint(bank, reply)
+    return f"\n{hint}" if hint else ""
 
 
 def _hub_public_key() -> str:
@@ -76,9 +87,10 @@ async def register(data: BankRegister, db: DB):
             logger.warning("셀프 등록 은행 코드 경합, 다시 시도 (%s)", attempt + 1)
     logger.info("셀프 등록: %s %s", bank.bank_code, bank.name, extra={"bank_code": bank.bank_code})
     hub_public = _hub_public_key()
-    ping = await ping_bank(bank)
+    ping, reply = await _ping(bank)
     alerts.notify("register", f"새 은행이 셀프 등록했습니다: {bank.bank_code} {bank.name}, "
-                  f"ping {'정상' if ping.ok else f'실패 (HTTP {ping.status}, 응답 서명 {ping.response_signature_valid})'}",
+                  f"ping {'정상' if ping.ok else f'실패 (HTTP {ping.status}, 응답 서명 {ping.response_signature_valid})'}"
+                  + ("" if ping.ok else _hint(bank, reply)),
                   bank_code=bank.bank_code, base_url=bank.base_url)
     return BankRegistered(bank_code=bank.bank_code, name=bank.name, api_key=api_key, hub_public_key=hub_public,
                           hub_fingerprint=fingerprint(hub_public), net_debit_cap=bank.net_debit_cap, ping=ping)
@@ -102,10 +114,10 @@ async def patch_me(data: MeUpdate, db: DB, bank: Annotated[Bank, Depends(current
     아니면 400 PING_FAILED와 ping 결과 (아무것도 바꾸지 않는다). 진행 중인 재시도도 다음 호출부터 새 주소로 간다."""
     new_url = str(data.base_url).rstrip("/") if data.base_url is not None else None
     if new_url is not None and new_url != bank.base_url:
-        ping = await ping_bank(bank, base_url=new_url)
+        ping, reply = await _ping(bank, base_url=new_url)
         if not ping.ok:
             alerts.notify("ping_failed", f"은행 {bank.bank_code}의 base_url 변경이 ping 실패로 거절됐습니다 "
-                          f"(HTTP {ping.status}, 응답 서명 {ping.response_signature_valid})",
+                          f"(HTTP {ping.status}, 응답 서명 {ping.response_signature_valid})" + _hint(bank, reply),
                           bank_code=bank.bank_code, base_url=new_url)
             raise ApiException(400, "PING_FAILED", "새 base_url이 정상으로 응답하지 않아 바꾸지 않았습니다 (ping 확인)",
                                extra={"ping": ping.model_dump()})

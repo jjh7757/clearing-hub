@@ -6,7 +6,7 @@
 |---|---|---|
 | Python (FastAPI) | [`src/bank_sim/main.py`](../src/bank_sim/main.py) | 가짜 은행 `902`. 받는 쪽 API(SPEC 4절·9.4), 허브 서명 검증, 응답 서명. 계좌번호 끝 4자리로 성공·실패·지연·속임을 재현한다. 허브 패키지의 `signing`·`response_signing`을 import한다 |
 | Python (최소) | [SPEC "빠른 시작"](../docs/SPEC.md) 2·3·5단계 | `signing.py`(서명·검증 4개), `bank.py`(받는 쪽 최소 구현, 메모리 저장), `send.py`(보내는 쪽). 허브 테스트 `tests/test_quickstart.py`가 실제로 실행한다 |
-| Node.js | `examples/node-bank` (준비 중) | SPEC만 보고 만든 받는 쪽·보내는 쪽 은행 (다음 단계에서 추가) |
+| Node.js (Express) | [`node-bank/`](node-bank/README.md) | SPEC만 보고 만든 받는 쪽·보내는 쪽 은행. 내장 `crypto`(Ed25519)로 서명 4개(`src/signing.js`, SPEC 예시 값을 `node --test`로 확인), 받는 쪽 API 3개 + 응답 서명 미들웨어(`src/bank.js`), 셀프 등록·이체·셀프 시험 스크립트. 메모리 저장. 로컬 허브 실행 결과 [`RESULTS.md`](node-bank/RESULTS.md), 만들며 찾은 SPEC 빈틈 [`SPEC_FEEDBACK.md`](node-bank/SPEC_FEEDBACK.md) |
 
 ## 로컬에서 붙여 보기
 

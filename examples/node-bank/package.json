@@ -1,0 +1,19 @@
+{
+  "name": "clearinghub-node-bank",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ClearingHub SPEC.md만 보고 만든 Node.js 참고 은행 (받는 쪽·보내는 쪽, 메모리 저장)",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=20.12" },
+  "scripts": {
+    "test": "node --test",
+    "keygen": "node src/signing.js keygen",
+    "start": "node src/bank.js",
+    "register": "node src/register.js",
+    "send": "node src/send.js",
+    "selftest": "node src/selftest.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

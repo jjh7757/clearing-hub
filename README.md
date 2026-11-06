@@ -22,7 +22,7 @@ src/clearing_hub/
 │   ├── bank_client.py      허브 → 은행 호출 (허브 키로 서명, 응답 서명 검증 필수, 타임아웃)
 │   ├── response_signing.py /v1 응답에 허브 응답 서명 (SPEC 2.5)
 │   ├── signature_doctor.py 서명 진단기 (규칙, LLM 없음): 실패한 서명을 흔한 실수 변형으로 다시 검증해 원인 가설 (SPEC 3.8)
-│   ├── llm.py              Claude 호출 (연동 지원 설명에만, 읽기 전용. ANTHROPIC_API_KEY 없으면 안 부름)
+│   ├── llm.py              Gemini 호출 (연동 지원 설명에만, 읽기 전용. GEMINI_API_KEY 없거나 질문·코드가 없으면 안 부름)
 │   ├── alerts.py           관리자 알림 웹훅 (ALERT_WEBHOOK_URL)
 │   └── config.py, database.py, exceptions.py, exception_handlers.py, request_id.py
 ├── domains/

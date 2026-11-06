@@ -242,6 +242,8 @@ def invite_message(code: str, expires_at: datetime, hub_url: str) -> str:
         f"- 허브 공개키 지문: {fingerprint(hub_public)} (등록 응답의 hub_fingerprint가 이 값과 같은지 꼭 확인하세요)",
         f"- 등록 방법: 키 쌍을 만들고 받는 쪽 API를 띄운 뒤 POST {hub_url}/v1/banks/register 에 "
         "invite_code·name·base_url·public_key를 보냅니다 (SPEC 3.5)",
+        "- 401이 나면 응답 본문의 hint를 먼저 보고, 그래도 모르겠으면 서명 코드를 붙여 "
+        f"POST {hub_url}/v1/diagnose (X-Bank-Code·X-Api-Key만, 서명 없이) — SPEC 3.8",
         "초대 코드는 한 번만 쓸 수 있습니다. 공개 채널(GitHub·단체 채팅방 등)에 올리지 마세요.",
     ]
     return "\n".join(lines)

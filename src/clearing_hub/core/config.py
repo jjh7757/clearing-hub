@@ -40,9 +40,9 @@ class Settings(BaseSettings):
     hub_public_url: str | None = None
     # 10단계 연동 지원 (SETTLEMENT_PLAN 14절, SPEC 3.8). 서명 진단은 규칙(core/signature_doctor.py)이 하고, LLM은 그 결과를
     # 한국어로 설명만 한다 (읽기 전용). 키가 없으면 LLM 단계를 건너뛰고 규칙 결과만 돌려준다
-    anthropic_api_key: SecretStr | None = None
-    diagnose_model: str = "claude-sonnet-5-5"  # 설명용 모델 (core/llm.py). claude-api 스킬의 현재 Sonnet
-    diagnose_max_tokens: int = Field(default=8000, gt=0)
+    gemini_api_key: SecretStr | None = None  # AvengersBank와 같은 Gemini. 없으면 LLM 단계를 건너뛴다
+    diagnose_model: str = "gemini-2.5-flash"  # 설명용 모델 (core/llm.py)
+    diagnose_max_tokens: int = Field(default=2048, gt=0)  # 10줄 안팎의 설명
     diagnose_timeout_seconds: float = Field(default=30, gt=0)  # 넘으면 규칙 결과만
     diagnose_daily_limit: int = Field(default=50, gt=0)  # POST /v1/diagnose: 은행별 하루(settlement_timezone) 횟수
     spec_path: str = "docs/SPEC.md"  # SPEC 발췌용 (작업 디렉터리 기준. 없으면 저장소 루트의 docs/SPEC.md)

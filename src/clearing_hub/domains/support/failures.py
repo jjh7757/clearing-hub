@@ -72,8 +72,10 @@ async def _save(failure: AuthFailure) -> None:
 
 # ---- BANK_TO_HUB ----
 
-async def record_bank_to_hub(request: Request, reason: str, message: str, bank_code: str | None) -> None:
-    """current_bank가 401을 낼 때. bank_code는 API 키가 맞은 은행이면 그 코드, 아니면 None. 예외를 올리지 않는다."""
+async def record_bank_to_hub(request: Request, reason: str, message: str, bank_code: str | None) -> AuthFailure | None:
+    """current_bank가 401을 낼 때. bank_code는 API 키가 맞은 은행이면 그 코드, 아니면 None. 예외를 올리지 않는다.
+    만든 AuthFailure를 돌려준다 (저장에 실패해도. 401 응답의 hint를 이것으로 진단한다). 만들지도 못했으면 None."""
+    failure = None
     try:
         body, truncated = _clip(await request.body())
         headers = {name: request.headers[name] for name in REQUEST_HEADERS if name in request.headers}
@@ -89,6 +91,7 @@ async def record_bank_to_hub(request: Request, reason: str, message: str, bank_c
         await asyncio.wait_for(_save(failure), RECORD_TIMEOUT_SECONDS)
     except Exception as exc:
         logger.warning("인증 실패 기록 실패 (BANK_TO_HUB %s): %s", reason, type(exc).__name__)
+    return failure
 
 
 # ---- HUB_TO_BANK ----

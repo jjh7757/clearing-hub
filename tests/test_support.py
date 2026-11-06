@@ -4,6 +4,7 @@ LLM은 실제로 부르지 않는다: `core/llm.complete`를 고정 답을 돌�
 """
 
 import json
+import time
 
 import httpx
 import pytest
@@ -144,7 +145,7 @@ async def test_diagnose_with_llm(banks, monkeypatch):
         calls.append((system, user))
         return "원인: 서명 PATH에 /v1이 빠졌습니다.\n고칠 곳: sign_request(…, \"/v1/me\", …)\nSPEC: 2.2"
 
-    monkeypatch.setattr(get_settings(), "anthropic_api_key", SecretStr("sk-test"))
+    monkeypatch.setattr(get_settings(), "gemini_api_key", SecretStr("test-key"))
     monkeypatch.setattr(llm, "complete", fake_complete)
     sender, _ = banks
     await fail_without_v1(sender)
@@ -164,11 +165,11 @@ async def test_llm_failure_falls_back_to_rules(banks, monkeypatch):
     async def down(system, user):
         raise llm.LlmUnavailable("시간 초과")
 
-    monkeypatch.setattr(get_settings(), "anthropic_api_key", SecretStr("sk-test"))
+    monkeypatch.setattr(get_settings(), "gemini_api_key", SecretStr("test-key"))
     monkeypatch.setattr(llm, "complete", down)
     sender, _ = banks
     await fail_without_v1(sender)
-    data = (await sender.client.post("/v1/diagnose", json={}, headers=ident(sender))).json()
+    data = (await sender.client.post("/v1/diagnose", json={"question": "왜?"}, headers=ident(sender))).json()
     assert data["used_llm"] is False and data["explanation"] is None and data["findings"]
 
 
@@ -272,3 +273,65 @@ async def test_self_test_alert_has_hint(banks, alert_sink):
     assert res.json()["receiver_reply"]["signature_valid"] is False
     [text] = await sent_alerts(alert_sink, "self_test")
     assert "원인 후보(추정): 응답을 등록한 공개키와 짝이 아닌 개인키로 서명했을 수 있음" in text
+
+
+async def test_llm_only_with_question_or_snippet(banks, monkeypatch):
+    """질문·코드가 없으면(또는 공백뿐이면) 키가 있어도 LLM을 부르지 않고 규칙 진단만 (규칙 결과를 되풀이하는 호출은 낭비)."""
+    calls = []
+
+    async def fake_complete(system: str, user: str) -> str:
+        calls.append(user)
+        return "원인: …"
+
+    monkeypatch.setattr(get_settings(), "gemini_api_key", SecretStr("test-key"))
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    sender, _ = banks
+    await fail_without_v1(sender)
+    for body in ({}, {"question": "  ", "snippet": ""}):
+        data = (await sender.client.post("/v1/diagnose", json=body, headers=ident(sender))).json()
+        assert data["used_llm"] is False and data["explanation"] is None
+        assert data["findings"][0]["hypotheses"][0]["code"] == "PATH_WITHOUT_V1"
+    admin = (await sender.client.post("/admin/banks/901/diagnose", json={}, headers=ADMIN)).json()
+    assert admin["used_llm"] is False
+    assert calls == []
+    assert (await sender.client.post("/v1/diagnose", json={"snippet": "sign(path)"}, headers=ident(sender))).json()["used_llm"]
+    assert len(calls) == 1
+
+
+# ---- 401 본문의 hint (SPEC 5절) ----
+
+async def test_401_hint_for_identified_bank(banks):
+    sender, _ = banks
+    body = (await fail_without_v1(sender)).json()
+    assert set(body) == {"error", "message", "hint"}
+    assert body["hint"].startswith("원인 후보(확인됨): 서명 PATH에 `/v1`이 빠짐")
+    assert "(SPEC 2.2) 자세히: GET /v1/diagnose/failures" in body["hint"]
+
+
+async def test_401_hint_shows_clock_skew_seconds(banks, client):
+    sender, _ = banks
+    old = sign_ed25519(sender.private_key, "GET", "/v1/me", b"", timestamp=int(time.time()) - 1000)
+    body = (await client.get("/v1/me", headers={**ident(sender), **old})).json()
+    assert body["error"] == "SIGNATURE_EXPIRED" and "서버 시계가 틀어짐" in body["hint"]
+    assert "초 느림" in body["hint"] and "서명 계산 자체는 맞다" in body["hint"]
+
+
+async def test_no_hint_without_identified_bank(banks, client):
+    """API 키가 틀리거나 없는 요청에는 hint를 넣지 않는다 (외부 스캐너에 서명 규칙을 알려 주지 않는다)."""
+    sender, _ = banks
+    bad = {"X-Bank-Code": "901", "X-Api-Key": "chk_wrong", **sign_ed25519(sender.private_key, "GET", "/me", b"")}
+    body = (await client.get("/v1/me", headers=bad)).json()
+    assert body["error"] == "UNAUTHORIZED" and "hint" not in body
+    assert "hint" not in (await client.get("/v1/me")).json()
+
+
+async def test_hint_failure_does_not_break_401(banks, monkeypatch):
+    from clearing_hub.domains.support import service as support_service
+
+    def broken(bank, failure):
+        raise RuntimeError("진단기 오류")
+
+    monkeypatch.setattr(support_service, "auth_hint", broken)
+    sender, _ = banks
+    body = (await fail_without_v1(sender)).json()
+    assert body["error"] == "SIGNATURE_INVALID" and "hint" not in body

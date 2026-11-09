@@ -6,6 +6,12 @@ name: deploy
 on:
   push:
     branches: [main]
+    # 문서만 바뀐 push는 배포하지 않는다 (서버 이미지에 영향이 없다).
+    # 문서와 코드가 함께 바뀌면 그대로 배포된다. SPEC의 빠른 시작 코드는 tests/test_quickstart.py가 확인하므로
+    # SPEC만 고쳤을 때는 로컬에서 그 테스트를 돌린다. 필요하면 Actions의 Run workflow(workflow_dispatch)로 직접 배포한다
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   workflow_dispatch:
 
 # OIDC로 임시 자격증명을 받는다 (장기 액세스 키 없음)

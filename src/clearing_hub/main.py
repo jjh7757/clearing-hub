@@ -78,9 +78,9 @@ app.include_router(account_admin_router)
 app.include_router(reserve_admin_router)
 app.include_router(settlement_admin_router)
 app.include_router(support_admin_router)
-app.include_router(admin_ui_router)  # 관리자 정산 화면 /admin/ui/settlements (데이터는 위 관리자 API로 읽는다)
+app.include_router(admin_ui_router)  # 관리자 화면 /admin/ui/settlements, /admin/ui/reserve-requests (데이터는 위 관리자 API로 읽는다)
 
 
 @app.get("/")
 async def root():
-    return {"service": "ClearingHub", "spec": "v1.2"}  # docs/SPEC.md 버전과 맞춘다
+    return {"service": "ClearingHub", "spec": "v1.3"}  # docs/SPEC.md 버전과 맞춘다

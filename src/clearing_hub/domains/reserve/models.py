@@ -60,3 +60,41 @@ class ReserveLedgerEntry(Base):
     memo: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     created_by: Mapped[str] = mapped_column(String(50), nullable=False)  # "admin" / "settlement"
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+class ReserveRequestKind(StrEnum):
+    DEPOSIT = "DEPOSIT"  # 입금(예치) 신청: 승인되면 DEPOSIT 분개
+    WITHDRAW = "WITHDRAW"  # 인출 신청: 승인되면 WITHDRAW 분개
+
+
+class ReserveRequestStatus(StrEnum):
+    PENDING = "PENDING"  # 관리자 결정 대기
+    APPROVED = "APPROVED"  # 승인: 분개(entry_id)가 남았다
+    REJECTED = "REJECTED"  # 거절: 사유(reject_reason)가 남았다
+    CANCELLED = "CANCELLED"  # 은행이 결정 전에 취소
+
+
+class ReserveRequest(Base):
+    """은행의 예치금 입금·인출 신청 (SPEC 10.9). 은행은 신청만 하고, 잔액은 허브 관리자가 승인할 때만 바뀐다.
+
+    은행이 스스로 예치금을 늘리는 API를 두지 않은 이유(SPEC 10.8)를 지키면서, 은행이 "돈을 넣었으니 반영해 달라"를
+    허브에 남길 수 있게 한다. 승인 = 관리자가 실제 입금(모의)을 확인했다는 뜻이다.
+    `request_ref`는 은행이 정하는 신청 번호로, 같은 은행 안에서 유일하다 (같은 신청을 다시 보내도 한 건만 생긴다).
+    """
+
+    __tablename__ = "reserve_requests"
+    __table_args__ = (UniqueConstraint("bank_code", "request_ref", name="uq_reserve_request_ref"),)
+
+    request_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bank_code: Mapped[str] = mapped_column(ForeignKey("banks.bank_code"), index=True, nullable=False)
+    request_ref: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)  # ReserveRequestKind
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)  # 원, 1 이상 (방향은 kind)
+    memo: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(10), index=True, nullable=False,
+                                        default=ReserveRequestStatus.PENDING)  # ReserveRequestStatus
+    reject_reason: Mapped[str | None] = mapped_column(String(200))
+    entry_id: Mapped[int | None] = mapped_column(ForeignKey("reserve_ledger.entry_id"))  # 승인 때 남긴 분개
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[str | None] = mapped_column(String(50))  # "admin" / "bank"(취소)

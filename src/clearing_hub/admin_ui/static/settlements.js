@@ -50,7 +50,9 @@ const dtFormat = new Intl.DateTimeFormat("en-CA", {
 
 function kst(iso) {
   if (!iso) return "—";
-  const parts = Object.fromEntries(dtFormat.formatToParts(new Date(iso)).map((p) => [p.type, p.value]));
+  // 허브는 UTC로 저장한다. SQLite(로컬 개발 서버)는 시간대 표시를 빼고 돌려주므로 없으면 UTC로 읽는다
+  const utc = /(Z|[+-]\d\d:?\d\d)$/i.test(iso) ? iso : `${iso}Z`;
+  const parts = Object.fromEntries(dtFormat.formatToParts(new Date(utc)).map((p) => [p.type, p.value]));
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
 

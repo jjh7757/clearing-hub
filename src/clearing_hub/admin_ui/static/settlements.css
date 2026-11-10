@@ -10,6 +10,7 @@ code { background: var(--gray-bg); padding: 0 4px; border-radius: 4px; }
 .topbar h1 { font-size: 17px; margin: 0; }
 .topbar .muted { color: #b8c0cc; }
 .topbar-right { display: flex; gap: 8px; align-items: center; }
+.topbar .navlink { color: #fff; text-decoration: none; border-bottom: 1px dashed #8a94a6; }
 .topbar .ghost { color: #fff; border-color: #4b5565; }
 main { max-width: 1200px; margin: 0 auto; padding: 16px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }

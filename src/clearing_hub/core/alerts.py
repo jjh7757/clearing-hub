@@ -56,7 +56,7 @@ def notify(kind: str, text: str, **context) -> asyncio.Task | None:
     """알림 하나를 띄우고 바로 돌아간다. 웹훅이 없거나 이벤트 루프 밖이면 None (아무것도 안 한다).
 
     kind: 사건 종류 (`dispute`, `auto_confirm`, `overdue`, `unknown`, `batch_skipped`, `register`, `ping_failed`,
-    `self_test`, `deadline_held`, `sim_bank`). text: 한국어 한두 줄. context: 핵심 ID (`run_id=12` 등)."""
+    `self_test`, `deadline_held`, `sim_bank`, `reserve_request`). text: 한국어 한두 줄. context: 핵심 ID (`run_id=12` 등)."""
     url = get_settings().alert_webhook_url
     if not url:
         return None

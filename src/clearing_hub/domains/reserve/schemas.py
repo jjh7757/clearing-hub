@@ -1,6 +1,9 @@
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
+
+from clearing_hub.domains.transfers.schemas import spec_time  # SPEC 1절 시각 형식 (초 단위 UTC, Z)
 
 
 class ReserveSummary(BaseModel):
@@ -55,3 +58,60 @@ class ReservePosted(BaseModel):
 
     entry: LedgerEntryOut
     reserve: ReserveSummary
+
+
+# --- 입금·인출 신청 (SPEC 10.9) ---
+
+MAX_REQUEST_AMOUNT = 1_000_000_000_000  # 1조 원. 오타(0 하나 더)를 막는 정도의 상한
+
+
+class ReserveRequestIn(BaseModel):
+    """은행의 신청. request_ref는 은행이 정하는 신청 번호 (같은 은행 안에서 유일, 다시 보내도 한 건)."""
+
+    request_ref: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$",
+                             description="은행이 정하는 신청 번호 (영문·숫자·_ . : -)")
+    kind: Literal["DEPOSIT", "WITHDRAW"]
+    amount: int = Field(ge=1, le=MAX_REQUEST_AMOUNT, description="금액(원)")
+    memo: str = Field(default="", max_length=200)
+
+
+class ReserveRequestOut(BaseModel):
+    request_id: int
+    request_ref: str
+    kind: str
+    amount: int
+    memo: str
+    status: str = Field(description="PENDING / APPROVED / REJECTED / CANCELLED")
+    reject_reason: str | None
+    entry_id: int | None = Field(description="승인 때 남긴 예치금 분개 번호")
+    balance_after: int | None = Field(description="승인 분개 반영 뒤 예치금 잔액")
+    created_at: datetime
+    decided_at: datetime | None
+
+    @field_serializer("created_at", "decided_at")
+    def _times(self, value: datetime | None) -> str | None:
+        return spec_time(value)
+
+
+class ReserveRequestList(BaseModel):
+    requests: list[ReserveRequestOut]
+
+
+class ReserveRequestAdminOut(ReserveRequestOut):
+    bank_code: str
+    decided_by: str | None
+
+
+class ReserveRequestReject(BaseModel):
+    reason: str = Field(min_length=1, max_length=200, description="거절 사유 (은행에 그대로 보인다)")
+
+    @field_validator("reason")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("거절 사유를 넣어야 합니다")
+        return value.strip()
+
+
+class ReserveRequestApprove(BaseModel):
+    memo: str = Field(default="", max_length=100, description="분개 메모에 덧붙일 관리자 메모")

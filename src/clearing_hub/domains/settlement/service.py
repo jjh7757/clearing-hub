@@ -96,20 +96,14 @@ async def create_draft(db: AsyncSession, settle_date: date | None, created_by: s
     # 8단계: 수집. ORM 객체를 읽지 않았으므로 세션 동기화는 하지 않는다
     collected = await db.execute(
         update(Transfer)
-        .where(Transfer.status == TransferStatus.COMPLETED, Transfer.settlement_run_id.is_(None),
-               Transfer.finished_at < cutoff_at)
+        .where(*_collectable(cutoff_at))
         .values(settlement_run_id=run.run_id)
         .execution_options(synchronize_session=False)
     )
     run.tx_count = collected.rowcount
 
     # 9단계: 상계
-    rows = (await db.execute(
-        select(Transfer.from_bank, Transfer.to_bank, func.count(), func.sum(Transfer.amount))
-        .where(Transfer.settlement_run_id == run.run_id)
-        .group_by(Transfer.from_bank, Transfer.to_bank)
-    )).all()
-    flows = {(from_bank, to_bank): (int(count), int(total)) for from_bank, to_bank, count, total in rows}
+    flows = await _flows(db, Transfer.settlement_run_id == run.run_id)
     run.positions.extend(_positions(flows))
     run.pairs.extend(_pairs(flows))
     run.total_amount = sum(total for _, total in flows.values())
@@ -119,6 +113,72 @@ async def create_draft(db: AsyncSession, settle_date: date | None, created_by: s
     logger.info("정산 DRAFT run %s: %s, 마감 %s, %s건 %s원", run.run_id, settle_date, cutoff_at.isoformat(),
                 run.tx_count, run.total_amount)
     return run
+
+
+def _collectable(cutoff_at: datetime) -> tuple:
+    """정산에 모을 거래의 조건: 미정산 COMPLETED 중 cutoff_at 전에 끝난 것 (8단계). `create_draft`와 `preview`가 같이 쓴다."""
+    return (Transfer.status == TransferStatus.COMPLETED, Transfer.settlement_run_id.is_(None),
+            Transfer.finished_at < cutoff_at)
+
+
+async def _flows(db: AsyncSession, *where) -> dict[tuple[str, str], tuple[int, int]]:
+    """조건에 맞는 거래를 (from_bank, to_bank)로 묶은 (건수, 합계). 상계(9단계)의 입력이다.
+    `create_draft`는 run_id로, `preview`는 `_collectable`로 부른다 — 같은 거래 집합이면 같은 표가 나온다."""
+    rows = (await db.execute(
+        select(Transfer.from_bank, Transfer.to_bank, func.count(), func.sum(Transfer.amount))
+        .where(*where)
+        .group_by(Transfer.from_bank, Transfer.to_bank)
+    )).all()
+    return {(from_bank, to_bank): (int(count), int(total)) for from_bank, to_bank, count, total in rows}
+
+
+# 아직 끝나지 않은 거래 (preview의 in_flight). COMPLETED가 되면 다음 정산에 들어간다
+IN_FLIGHT = (TransferStatus.ACCEPTED, TransferStatus.DELIVERING, TransferStatus.PENDING, TransferStatus.UNKNOWN)
+
+
+@dataclass
+class Preview:
+    """`preview`의 결과: 지금 `create_draft(None)`을 돌리면 만들어질 표 + 화면용 참고 집계."""
+
+    settle_date: date
+    cutoff_at: datetime
+    tx_count: int
+    total_amount: int
+    positions: list[SettlementPosition]
+    pairs: list[SettlementPair]
+    after_cutoff: tuple[int, int]  # (건수, 합계): 마감 뒤 COMPLETED 된 미정산 거래 → 다음 정산
+    in_flight: tuple[int, int, dict[str, int]]  # (건수, 합계, 상태별 건수)
+    draft_run_id: int | None
+
+
+async def preview(db: AsyncSession) -> Preview:
+    """"지금 정산하면" 미리보기 (관리자 실시간 장부 화면). **읽기만 한다** — run을 만들지 않고 거래에 run_id를 찍지 않는다.
+
+    `create_draft(settle_date=None)`(일일 배치와 같은 기본값: 어제, 마감 = 오늘 00:00 tz)이 지금 돌면 모을 거래
+    (`_collectable`)를 같은 `_flows`·`_positions`·`_pairs`로 계산한다. 포지션 객체는 세션에 넣지 않는다.
+    DRAFT가 이미 있으면 그 거래는 settlement_run_id가 찍혀 있어 여기서 빠지고, 실제로 돌리면 409다 (`draft_run_id`).
+    """
+    settle_date, cutoff_at = compute_cutoff(None, _now())
+    flows = await _flows(db, *_collectable(cutoff_at))
+    after = (await db.execute(
+        select(func.count(), func.coalesce(func.sum(Transfer.amount), 0))
+        .where(Transfer.status == TransferStatus.COMPLETED, Transfer.settlement_run_id.is_(None),
+               Transfer.finished_at >= cutoff_at)
+    )).one()
+    rows = (await db.execute(
+        select(Transfer.status, func.count(), func.coalesce(func.sum(Transfer.amount), 0))
+        .where(Transfer.status.in_(IN_FLIGHT)).group_by(Transfer.status)
+    )).all()
+    by_status = {str(s): 0 for s in IN_FLIGHT} | {str(status): int(count) for status, count, _ in rows}
+    draft = await _current_draft(db)
+    return Preview(
+        settle_date=settle_date, cutoff_at=cutoff_at,
+        tx_count=sum(count for count, _ in flows.values()), total_amount=sum(total for _, total in flows.values()),
+        positions=_positions(flows), pairs=_pairs(flows),
+        after_cutoff=(int(after[0]), int(after[1])),
+        in_flight=(sum(by_status.values()), sum(int(total) for _, _, total in rows), by_status),
+        draft_run_id=draft.run_id if draft else None,
+    )
 
 
 def _positions(flows: dict[tuple[str, str], tuple[int, int]]) -> list[SettlementPosition]:

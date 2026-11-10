@@ -190,6 +190,12 @@ async def ledger(db: AsyncSession, bank_code: str, limit: int = 100) -> list[Res
     return list((await db.scalars(stmt)).all())
 
 
+async def ledger_all(db: AsyncSession, limit: int = 100) -> list[ReserveLedgerEntry]:
+    """전체 은행의 분개, 최신순 (최대 500건). 관리자 실시간 장부 화면용."""
+    stmt = select(ReserveLedgerEntry).order_by(ReserveLedgerEntry.entry_id.desc()).limit(min(max(limit, 1), 500))
+    return list((await db.scalars(stmt)).all())
+
+
 def _summary(bank: Bank, balance: int, exposure: int) -> dict:
     return {"bank_code": bank.bank_code, "balance": balance, "net_debit_cap": bank.net_debit_cap, "exposure": exposure,
             "available": balance + bank.net_debit_cap - exposure}
@@ -206,11 +212,12 @@ async def summary(db: AsyncSession, bank_code: str, exposure: int) -> dict:
 
 
 async def list_admin(db: AsyncSession, exposures: dict[str, int]) -> list[dict]:
-    """등록된 은행 전부의 예치금. 계좌가 아직 없는 은행은 잔액 0으로 보여 주고 만들지는 않는다.
+    """등록된 은행 전부의 예치금과 상태(`position_status`). 계좌가 아직 없는 은행은 잔액 0으로 보여 주고 만들지는 않는다.
     exposures는 은행 코드 → 미정산 순채무 (summary와 같은 이유로 밖에서 받는다). 없는 은행은 0."""
     stmt = (select(Bank, ReserveAccount).outerjoin(ReserveAccount, ReserveAccount.bank_code == Bank.bank_code)
             .order_by(Bank.bank_code))
     rows = (await db.execute(stmt)).all()
     return [{**_summary(bank, account.balance if account else 0, exposures.get(bank.bank_code, 0)),
-             "updated_at": account.updated_at if account else None}
+             "updated_at": account.updated_at if account else None,
+             "status": position_status(account.balance if account else 0, bank.net_debit_cap).value}
             for bank, account in rows]

@@ -83,6 +83,31 @@ class SettlementDetail(SettlementRunOut):
                                   "그때 dispute가 없으면 auto-deadline으로 확정된다. 그 밖에는 null (관리자 화면용)")
 
 
+class CountTotal(BaseModel):
+    count: int
+    total: int = Field(description="금액 합(원)")
+
+
+class InFlightOut(CountTotal):
+    by_status: dict[str, int] = Field(description="ACCEPTED / DELIVERING / PENDING / UNKNOWN 별 건수 (0도 넣는다)")
+
+
+class SettlementPreview(BaseModel):
+    """GET /admin/settlements/preview: 지금 `POST /admin/settlements/run`(본문 없음 = 어제)을 돌리면 만들어질 표.
+    DB에 아무것도 쓰지 않는다 (관리자 실시간 장부 화면용)."""
+
+    settle_date: date
+    cutoff_at: UtcDatetime = Field(description="이 시각 전에 COMPLETED 된 미정산 거래를 모은다 (오늘 00:00 KST)")
+    tx_count: int
+    total_amount: int
+    positions: list[PositionOut] = Field(description="은행별 순 포지션, 은행 코드순. 합은 0. result·balance_after는 null")
+    pairs: list[PairOut]
+    after_cutoff: CountTotal = Field(description="마감 뒤 COMPLETED 된 미정산 거래 → 다음 정산으로 넘어간다")
+    in_flight: InFlightOut = Field(description="아직 끝나지 않은 거래 (ACCEPTED·DELIVERING·PENDING·UNKNOWN)")
+    draft_run_id: int | None = Field(description="확정하지 않은 DRAFT run이 있으면 그 id. 그 run의 거래는 미리보기에서 빠지고, "
+                                                 "지금 돌리면 409 SETTLEMENT_DRAFT_EXISTS다")
+
+
 class SettlementTransferOut(BaseModel):
     transfer_id: str
     from_bank: str

@@ -18,6 +18,7 @@ class ReserveSummary(BaseModel):
 
 class ReserveAdmin(ReserveSummary):
     updated_at: datetime | None = Field(description="마지막 변동 시각. 계좌가 아직 없으면 null")
+    status: str = Field(description="OK(잔액 ≥ 0) / OVERDRAWN(−한도 ≤ 잔액 < 0) / OVERDUE(잔액 < −한도). 관리자용")
 
 
 class ReserveMovement(BaseModel):

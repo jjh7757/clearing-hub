@@ -69,3 +69,10 @@ dialog h3 { margin-top: 0; }
 dialog textarea { width: 100%; margin-top: 4px; }
 dialog p { white-space: pre-line; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+/* 실시간 장부 화면 (ledger.html) */
+.live { margin: 0 0 8px; }
+tr.row-warn { background: var(--amber-bg); }
+tr.row-bad { background: var(--red-bg); }
+.b-OK { background: var(--green-bg); color: var(--green); }
+.b-OVERDRAWN { background: var(--amber-bg); color: var(--amber); }
+.b-OVERDUE { background: var(--red-bg); color: var(--red); }

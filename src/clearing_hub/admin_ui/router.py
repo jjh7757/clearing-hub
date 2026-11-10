@@ -1,4 +1,5 @@
-"""관리자 화면: 정산 `GET /admin/ui/settlements`, 예치금 신청 `GET /admin/ui/reserve-requests` (HTML)와 그 스크립트·스타일.
+"""관리자 화면: 정산 `GET /admin/ui/settlements`, 예치금 신청 `GET /admin/ui/reserve-requests`,
+실시간 장부 `GET /admin/ui/ledger` (HTML)와 그 스크립트·스타일.
 
 페이지 자체에는 데이터·토큰이 없어서 인증 없이 준다. 관리자가 페이지에 토큰을 넣으면 브라우저가 그 토큰을
 `X-Admin-Token`으로 붙여 기존 관리자 API(`/admin/settlements`, `/admin/banks`)를 부른다. 토큰은 그 탭의
@@ -56,3 +57,13 @@ async def reserve_requests_page():
 @router.get("/reserve-requests.js")
 async def reserve_requests_script():
     return _file("reserve-requests.js", "text/javascript; charset=utf-8")
+
+
+@router.get("/ledger")
+async def ledger_page():
+    return _file("ledger.html", "text/html; charset=utf-8")
+
+
+@router.get("/ledger.js")
+async def ledger_script():
+    return _file("ledger.js", "text/javascript; charset=utf-8")

@@ -16,9 +16,9 @@ from clearing_hub.domains.settlement.models import (
 )
 from clearing_hub.workers import settlement as settlement_worker
 from clearing_hub.domains.settlement.schemas import (
-    AckAdminOut, AckOut, BankPositionOut, BankSettlementDetail, BankSettlementList, BankSettlementOut, DisputeIn,
-    PairOut, PositionOut, ReconTransferOut, SettlementConfirm, SettlementDetail, SettlementRunCreate, SettlementRunOut,
-    SettlementTransferOut,
+    AckAdminOut, AckOut, BankPositionOut, BankSettlementDetail, BankSettlementList, BankSettlementOut, CountTotal,
+    DisputeIn, InFlightOut, PairOut, PositionOut, ReconTransferOut, SettlementConfirm, SettlementDetail,
+    SettlementPreview, SettlementRunCreate, SettlementRunOut, SettlementTransferOut,
 )
 
 # 은행용 대사 API (SETTLEMENT_PLAN 6.1·13절, SPEC 10.4·10.5·10.7). 쿼리스트링 없이 부른다 (SPEC 2.2). 요청한 은행의 몫만 준다
@@ -131,6 +131,24 @@ async def admin_run_settlement(db: DB, data: SettlementRunCreate | None = None):
 async def admin_list_settlements(db: DB, limit: Annotated[int, Query(ge=1, le=365)] = 30):
     """최근 정산 목록, 최신순."""
     return [SettlementRunOut.model_validate(r, from_attributes=True) for r in await service.list_runs(db, limit)]
+
+
+@admin_router.get("/preview", response_model=SettlementPreview)
+async def admin_preview_settlement(db: DB):
+    """"지금 정산하면" 미리보기 (읽기 전용). 본문 없는 `POST /admin/settlements/run`(어제, 마감 오늘 00:00 KST)이
+    지금 모을 거래로 포지션·쌍별 표를 계산한다. run을 만들지 않고 거래에 표시하지 않는다.
+    `after_cutoff`(마감 뒤 완료 → 다음 정산), `in_flight`(아직 안 끝남), `draft_run_id`(DRAFT가 있으면 그 거래는 빠진다).
+    `/{run_id}`보다 먼저 선언한다 (경로 충돌)."""
+    p = await service.preview(db)
+    count, total, by_status = p.in_flight
+    return SettlementPreview(
+        settle_date=p.settle_date, cutoff_at=p.cutoff_at, tx_count=p.tx_count, total_amount=p.total_amount,
+        positions=[PositionOut.model_validate(x, from_attributes=True) for x in p.positions],
+        pairs=[PairOut.model_validate(x, from_attributes=True) for x in p.pairs],
+        after_cutoff=CountTotal(count=p.after_cutoff[0], total=p.after_cutoff[1]),
+        in_flight=InFlightOut(count=count, total=total, by_status=by_status),
+        draft_run_id=p.draft_run_id,
+    )
 
 
 @admin_router.get("/{run_id}", response_model=SettlementDetail)

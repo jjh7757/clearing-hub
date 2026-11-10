@@ -41,10 +41,16 @@ async def my_reserve(db: DB, bank: Annotated[Bank, Depends(current_bank)]):
 
 @admin_router.get("", response_model=list[ReserveAdmin])
 async def admin_list_reserve(db: DB):
-    """은행별 예치금·한도·미정산 순채무. 모의 예치금이며 실제 돈과는 무관하다 (SETTLEMENT_PLAN 10절).
+    """은행별 예치금·한도·미정산 순채무·상태(OK / OVERDRAWN / OVERDUE). 모의 예치금이며 실제 돈과는 무관하다 (SETTLEMENT_PLAN 10절).
     순채무는 은행마다 한 번씩 계산한다 (참가 은행이 몇 개뿐이라 N번 쿼리로 충분하다)."""
     banks = await bank_service.list_banks(db, active_only=False)
     return await service.list_admin(db, {b.bank_code: await open_exposure(db, b.bank_code) for b in banks})
+
+
+@admin_router.get("/ledger", response_model=list[LedgerEntryOut])
+async def admin_ledger_all(db: DB, limit: int = 100):
+    """전체 은행의 분개, 최신순 (`limit` 기본 100, 최대 500)."""
+    return [LedgerEntryOut.model_validate(e, from_attributes=True) for e in await service.ledger_all(db, limit)]
 
 
 async def _posted(db: AsyncSession, entry: ReserveLedgerEntry) -> ReservePosted:

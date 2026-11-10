@@ -204,6 +204,15 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping
 
 로컬에서는 `uv run python -m clearing_hub.devserver`로 띄우고 `http://127.0.0.1:8000/admin/ui/settlements`에 시작 로그의 관리자 토큰을 넣는다.
 
+### 관리자 실시간 장부 화면
+
+`/admin/ui/ledger` (세 관리자 화면은 상단 링크로 서로 오간다. 토큰도 같은 탭이면 다시 넣지 않는다). 5초마다 다시 읽고, `일시정지`를 누르거나 탭이 안 보이면 멈춘다.
+
+- **은행별 예치금 현황**: 잔액·순채무한도·미정산 순채무·가용액·상태. 가용액이 한도의 20% 미만이거나 OVERDRAWN이면 노란색, OVERDUE면 빨간색
+- **지금 정산하면**: 본문 없는 정산 run(어제 정산일)을 지금 돌리면 모을 거래의 포지션·쌍별 상계, 마감 뒤 완료돼 다음 정산으로 넘어갈 거래, 진행 중 거래. DRAFT가 있으면 그 거래는 빠진다고 알린다 (`GET /admin/settlements/preview`, 아무것도 저장하지 않는다)
+- **최근 거래 20건**, **최근 예치금 분개 20건** (`GET /admin/reserve/ledger`, 전체 은행)
+- 새 마이그레이션·환경 변수 없음. 은행용 API(SPEC)는 바뀌지 않는다
+
 ## Ed25519 필수화 배포 순서 (8c, SPEC v1.0)
 
 8c부터 허브는 **Ed25519 서명만** 받고 보낸다 (HMAC·서명 모드 없음). 허브는 `HUB_SIGNING_KEY`가 없으면, 가짜 은행은 `SIM_SIGNING_KEY`가 없으면 **시작하지 않는다.** 공개키가 없는 은행은 요청이 `401 SIGNATURE_INVALID`("등록된 공개키가 없습니다"), 그 은행으로 보내는 이체는 접수 전 거절 `PUBLIC_KEY_MISSING`이다 (돈은 안 움직인다). AvengersBank(901)도 같은 때 Ed25519로 바꿔야 한다 (AvengersBank 8d).

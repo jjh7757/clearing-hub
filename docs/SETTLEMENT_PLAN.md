@@ -254,12 +254,14 @@ MISMATCH가 바로 이 계획의 목적이다. 받는 은행이 입금 없이 `C
 |---|---|---|
 | POST | `/admin/settlements/run` | `{settle_date?}` 정산 DRAFT 생성 (8·9단계) → 201 run 요약 + 포지션 + 쌍별 표. 생략하면 어제, 오늘이면 즉시 마감, 내일 이후 422 `VALIDATION_ERROR`. DRAFT가 남아 있으면 409 `SETTLEMENT_DRAFT_EXISTS`(`run_id`) |
 | GET | `/admin/settlements` | 목록, 최신순 (`limit`, 기본 30) |
+| GET | `/admin/settlements/preview` | "지금 정산하면" 미리보기 (읽기 전용, DB 무변경). 본문 없는 `run`이 지금 모을 거래로 `settle_date`·`cutoff_at`·`tx_count`·`total_amount`·`positions`·`pairs` + `after_cutoff {count, total}`(마감 뒤 완료 → 다음 정산), `in_flight {count, total, by_status}`(ACCEPTED·DELIVERING·PENDING·UNKNOWN), `draft_run_id`(DRAFT가 있으면 그 거래는 빠진다) |
 | GET | `/admin/settlements/{run_id}` | 포지션 전체(은행 코드순) + 쌍별 표. 없으면 404 `SETTLEMENT_NOT_FOUND` |
 | GET | `/admin/settlements/{run_id}/transfers` | 거래 목록 JSON (`transfer_id`, `from_bank`, `to_bank`, `amount`, `finished_at`, `holder_name`) |
 | GET | `/admin/settlements/{run_id}/transfers.csv` | 같은 내용 CSV (UTF-8, BOM 없음, 헤더 행, `settlement_{run_id}.csv`) |
 | POST | `/admin/settlements/{run_id}/cancel` | DRAFT 취소: 거래를 미정산으로 되돌림. DRAFT가 아니면 409 `SETTLEMENT_NOT_DRAFT` |
 | POST | `/admin/settlements/{run_id}/confirm` | 확정 (11·12단계). 본문 `{reason?}`(200자까지, 로그에만) → 200 run 상세: `status: SETTLED`, `settled_at`, `settled_by: "admin"`, 포지션마다 `result`(OK / OVERDRAWN / OVERDUE)·`balance_after`. DRAFT가 아니면 409 `SETTLEMENT_NOT_DRAFT`(`run_id`), 없으면 404. 이미 분개가 있으면 409 `RESERVE_ALREADY_APPLIED`(run은 DRAFT로 남음) |
-| GET | `/admin/reserve` | 은행별 예치금·한도·exposure |
+| GET | `/admin/reserve` | 은행별 예치금·한도·exposure·`status`(OK / OVERDRAWN / OVERDUE) |
+| GET | `/admin/reserve/ledger` | 전체 은행 분개, 최신순 (`limit` 기본 100, 최대 500) |
 | POST | `/admin/reserve/{bank_code}/deposit` | `{amount, memo}` 예치 (DEPOSIT 분개) |
 | POST | `/admin/reserve/{bank_code}/withdraw` | `{amount, memo}` 인출. `balance − amount < −cap` 이면 거절 |
 | POST | `/admin/reserve/{bank_code}/adjust` | `{amount, memo}` 정정 분개 (양수·음수). 사유 필수 |

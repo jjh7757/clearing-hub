@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 
+from clearing_hub.admin_ui.router import router as admin_ui_router
 from clearing_hub.core import alerts
 from clearing_hub.core.config import get_settings
 from clearing_hub.core.database import engine
@@ -77,6 +78,7 @@ app.include_router(account_admin_router)
 app.include_router(reserve_admin_router)
 app.include_router(settlement_admin_router)
 app.include_router(support_admin_router)
+app.include_router(admin_ui_router)  # 관리자 정산 화면 /admin/ui/settlements (데이터는 위 관리자 API로 읽는다)
 
 
 @app.get("/")

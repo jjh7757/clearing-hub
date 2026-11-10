@@ -1,15 +1,20 @@
 import csv
 import io
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from clearing_hub.core.auth import current_bank, require_admin
+from clearing_hub.core.config import get_settings
 from clearing_hub.core.database import get_db
 from clearing_hub.domains.banks.models import Bank
 from clearing_hub.domains.settlement import auto_confirm, service
-from clearing_hub.domains.settlement.models import AckResult, SettlementAck, SettlementPosition, SettlementRun
+from clearing_hub.domains.settlement.models import (
+    AckResult, SettlementAck, SettlementPosition, SettlementRun, SettlementStatus,
+)
+from clearing_hub.workers import settlement as settlement_worker
 from clearing_hub.domains.settlement.schemas import (
     AckAdminOut, AckOut, BankPositionOut, BankSettlementDetail, BankSettlementList, BankSettlementOut, DisputeIn,
     PairOut, PositionOut, ReconTransferOut, SettlementConfirm, SettlementDetail, SettlementRunCreate, SettlementRunOut,
@@ -90,14 +95,25 @@ async def dispute_settlement(run_id: int, data: DisputeIn, db: DB, bank: Me):
     return await _record(db, run_id, bank, AckResult.DISPUTE, data)
 
 
+def _confirm_deadline(run: SettlementRun) -> datetime | None:
+    """DRAFT의 다음 확정 마감 시각 (workers/settlement.py가 auto_confirm.confirm_at_deadline을 부르는 시각).
+    워커가 꺼져 있으면 마감 작업이 돌지 않으므로 None (관리자가 확정해야 한다)."""
+    if run.status != SettlementStatus.DRAFT or not get_settings().settlement_worker_enabled:
+        return None
+    return settlement_worker.next_deadline(datetime.now(UTC))
+
+
 def _detail(run: SettlementRun) -> SettlementDetail:
     acks = [AckAdminOut(bank_code=a.bank_code, result=a.result, transfer_ids=auto_confirm.transfer_ids(a),
                         message=a.message, created_at=a.created_at, updated_at=a.updated_at) for a in run.acks]
+    answered = {a.bank_code for a in acks}
     return SettlementDetail(
         **SettlementRunOut.model_validate(run, from_attributes=True).model_dump(),
         positions=[PositionOut.model_validate(p, from_attributes=True) for p in run.positions],
         pairs=[PairOut.model_validate(p, from_attributes=True) for p in run.pairs],
         acks=acks, disputed=any(a.result == AckResult.DISPUTE for a in acks),
+        unanswered=[p.bank_code for p in run.positions if p.bank_code not in answered],
+        confirm_deadline_at=_confirm_deadline(run),
     )
 
 

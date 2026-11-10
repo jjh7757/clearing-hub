@@ -191,6 +191,19 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/903/ping
 2. 재시작 뒤 확인: `curl -s $HUB/` → `"spec": "v1.2"`. `curl -s $HUB/admin/banks/902/auth-failures -H "X-Admin-Token: $TOKEN"`이 `{"bank_code":"902","findings":[…]}`로 답한다
 3. API 키가 맞은 은행의 401 본문에 `hint`(규칙 진단 한 줄)가 붙는다. 은행은 `GET /v1/diagnose/failures`(서명 없이 API 키만)로 자세히 본다
 
+### 관리자 정산 화면
+
+브라우저로 `https://clearing-hub.ai-agent-develop.cloud/admin/ui/settlements`를 열고 `ADMIN_TOKEN`을 넣는다. SSM으로 DB를 보지 않아도 된다.
+
+- **목록**: run마다 정산일·상태·건수·합계·만든 주체/시각·확정 주체/시각(`auto`·`auto-ack`·`auto-deadline`·`admin`). 시각은 모두 KST
+- **상세**(행 클릭, 주소 `#run=5`로 바로 열기): 은행별 포지션(+ 받을 은행, − 낼 은행, 확정 뒤 반영 결과·잔액), 은행별 ack/dispute(시각, dispute 메시지·transfer_id, 아직 확인하지 않은 은행은 `미응답`), 은행 쌍별 표, 거래 목록
+- **DRAFT 안내**: 다음 확정 마감 시각(`SETTLEMENT_CONFIRM_DEADLINE`)과 남은 시간, 그때 자동 확정되는지(dispute 없음) 아니면 관리자 판정이 필요한지(dispute 있음, 빨간 상자). 워커가 꺼져 있으면(`SETTLEMENT_WORKER_ENABLED=false`) 그렇게 알린다
+- **관리 동작**: DRAFT의 확정(사유 필수)·취소, 수동 정산 run. 모두 확인 대화상자를 거친다. 기존 관리자 API(`/admin/settlements/...`)를 그대로 부른다
+- 토큰은 그 탭의 `sessionStorage`에만 둔다(탭을 닫거나 `토큰 지우기`를 누르면 지워진다). 페이지는 토큰 없이 열리지만 데이터는 관리자 API가 401로 막는다. 새 마이그레이션·환경 변수는 없다
+- 상세 응답(`GET /admin/settlements/{run_id}`)에 화면용 필드 `unanswered`(포지션이 있는데 ack도 dispute도 안 보낸 은행)와 `confirm_deadline_at`(DRAFT이고 워커가 켜져 있을 때 다음 마감 시각, 그 밖에는 null)이 더해졌다
+
+로컬에서는 `uv run python -m clearing_hub.devserver`로 띄우고 `http://127.0.0.1:8000/admin/ui/settlements`에 시작 로그의 관리자 토큰을 넣는다.
+
 ## Ed25519 필수화 배포 순서 (8c, SPEC v1.0)
 
 8c부터 허브는 **Ed25519 서명만** 받고 보낸다 (HMAC·서명 모드 없음). 허브는 `HUB_SIGNING_KEY`가 없으면, 가짜 은행은 `SIM_SIGNING_KEY`가 없으면 **시작하지 않는다.** 공개키가 없는 은행은 요청이 `401 SIGNATURE_INVALID`("등록된 공개키가 없습니다"), 그 은행으로 보내는 이체는 접수 전 거절 `PUBLIC_KEY_MISSING`이다 (돈은 안 움직인다). AvengersBank(901)도 같은 때 Ed25519로 바꿔야 한다 (AvengersBank 8d).

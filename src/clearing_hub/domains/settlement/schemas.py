@@ -77,6 +77,10 @@ class SettlementDetail(SettlementRunOut):
     pairs: list[PairOut] = Field(description="은행 쌍별 표 (화면·CSV용)")
     acks: list[AckAdminOut] = Field(default=[], description="은행이 보낸 ack/dispute, 은행 코드순")
     disputed: bool = Field(default=False, description="DISPUTE가 하나라도 있으면 true. 자동 확정하지 않는다")
+    unanswered: list[str] = Field(default=[], description="포지션이 있는데 아직 ack도 dispute도 보내지 않은 은행, 코드순")
+    confirm_deadline_at: UtcDatetime | None = Field(
+        default=None, description="DRAFT이고 정산 워커가 켜져 있을 때 다음 확정 마감 시각(SETTLEMENT_CONFIRM_DEADLINE). "
+                                  "그때 dispute가 없으면 auto-deadline으로 확정된다. 그 밖에는 null (관리자 화면용)")
 
 
 class SettlementTransferOut(BaseModel):

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>정산 관리 · ClearingHub</title>
+  <link rel="stylesheet" href="/admin/ui/settlements.css">
+  <script src="/admin/ui/settlements.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>ClearingHub 정산 관리</h1>
+    <div class="topbar-right">
+      <span id="clock" class="muted"></span>
+      <button id="refresh" type="button" class="ghost" hidden>새로고침</button>
+      <button id="logout" type="button" class="ghost" hidden>토큰 지우기</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="login" class="card narrow" hidden>
+      <h2>관리자 토큰</h2>
+      <p class="muted">허브의 <code>ADMIN_TOKEN</code>을 넣습니다. 이 탭의 sessionStorage에만 두며, 탭을 닫으면 지워집니다.</p>
+      <form id="login-form">
+        <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="X-Admin-Token" required minlength="32">
+        <button type="submit">열기</button>
+      </form>
+      <p id="login-error" class="error" hidden></p>
+    </section>
+
+    <div id="app" hidden>
+      <p id="flash" class="flash" hidden></p>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>정산 run 목록</h2>
+          <form id="run-form" class="inline">
+            <label>정산일 <input id="run-date" type="date"></label>
+            <button type="submit" class="ghost">수동 정산 run 만들기</button>
+          </form>
+        </div>
+        <div class="table-wrap">
+          <table id="runs">
+            <thead>
+              <tr>
+                <th>run</th><th>정산일</th><th>상태</th><th class="num">건수</th><th class="num">합계</th>
+                <th>만든 주체</th><th>만든 시각</th><th>확정 시각</th><th>확정 주체</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="muted small">시각은 모두 한국 시간(KST)입니다. 행을 누르면 상세가 열립니다.</p>
+      </section>
+
+      <section id="detail" class="card" hidden></section>
+    </div>
+  </main>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog" id="confirm-form">
+      <h3 id="confirm-title"></h3>
+      <p id="confirm-body"></p>
+      <label id="confirm-reason-label" hidden>사유 (필수, 200자까지)
+        <textarea id="confirm-reason" maxlength="200" rows="3"></textarea>
+      </label>
+      <p id="confirm-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="confirm-cancel" class="ghost">닫기</button>
+        <button type="submit" id="confirm-ok" class="danger">실행</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

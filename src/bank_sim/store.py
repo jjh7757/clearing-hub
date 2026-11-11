@@ -6,15 +6,16 @@
   accounts(account_num PK, holder, product_name, balance)   고객 계좌. 시작할 때 SIM_CUSTOMERS로 시드한다
   transactions(id, account_num, direction 'IN'/'OUT', amount, counterpart_*, memo, transfer_id, status, created_at)
     IN  = 허브가 보낸 입금 (`/interbank/receive`). transfer_id가 유일하다 (멱등)
-    OUT = 2단계 보내기용 자리 (아직 쓰지 않는다)
+    OUT = 이 은행 고객이 다른 은행으로 보낸 것 (`/sim/api/transfers`). transfer_id가 유일하다.
+          PENDING(차감됨) → COMPLETED, 또는 FAILED(같은 트랜잭션에서 환불). fail_code·fail_message는 FAILED 사유
 
 잔액 규칙
   - 받는 계좌가 accounts에 있으면(고객 계좌) 같은 트랜잭션에서 잔액 증가 + IN 기록
   - 고객 계좌가 아니면(끝자리 시나리오·외부 은행 시험 송금) IN 기록만 남고 잔액은 없다
 
 동시성: 연결 하나를 잠금으로 감싸 쓴다 (FastAPI 핸들러는 이벤트 루프에서 돌지만, 테스트·uvicorn 스레드에서도 안전하게).
-쓰기는 `BEGIN IMMEDIATE`로 묶는다. 2단계의 차감·환불은 `transaction()` 안에서 `_add_balance`·`_insert_transaction`을
-조합해 만든다.
+쓰기는 `BEGIN IMMEDIATE`로 묶는다. 보내기의 차감(`start_send`)·확정/환불(`finish_send`)도 한 트랜잭션씩이다.
+확정은 `status = 'PENDING'`일 때만 바꾸는 조건부 UPDATE라, 두 번 불려도 환불은 한 번이다.
 """
 
 import sqlite3
@@ -24,6 +25,8 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 
 MEMORY = ":memory:"
+# 1단계 파일에 없던 칸. 열 때 없으면 붙인다 (CREATE TABLE IF NOT EXISTS는 칸을 더하지 않는다)
+ADDED_COLUMNS = {"fail_code": "TEXT", "fail_message": "TEXT", "finished_at": "TEXT"}
 INITIAL_BALANCE = 1_000_000
 
 SCHEMA = """
@@ -45,9 +48,13 @@ CREATE TABLE IF NOT EXISTS transactions (
     memo                  TEXT NOT NULL DEFAULT '',
     transfer_id           TEXT NOT NULL,
     status                TEXT NOT NULL,
-    created_at            TEXT NOT NULL
+    created_at            TEXT NOT NULL,
+    fail_code             TEXT,
+    fail_message          TEXT,
+    finished_at           TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_in_transfer_id ON transactions (transfer_id) WHERE direction = 'IN';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_out_transfer_id ON transactions (transfer_id) WHERE direction = 'OUT';
 CREATE INDEX IF NOT EXISTS ix_transactions_account ON transactions (account_num, id);
 """
 
@@ -64,6 +71,11 @@ class Ledger:
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            have = {r["name"] for r in self._conn.execute("PRAGMA table_info(transactions)").fetchall()}
+            if have:  # 1단계에서 만든 파일: 새 칸을 먼저 붙인다 (SCHEMA의 인덱스는 칸과 무관)
+                for name, kind in ADDED_COLUMNS.items():
+                    if name not in have:
+                        self._conn.execute(f"ALTER TABLE transactions ADD COLUMN {name} {kind}")
             self._conn.executescript(SCHEMA)
         self._seeded: list[dict] = []
 
@@ -97,6 +109,11 @@ class Ledger:
         with self._lock:
             row = self._conn.execute("SELECT * FROM accounts WHERE account_num = ?", (account_num,)).fetchone()
         return dict(row) if row else None
+
+    def customer_accounts(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM accounts ORDER BY account_num").fetchall()
+        return [dict(r) for r in rows]
 
     def balance(self, account_num: str) -> int | None:
         acc = self.account(account_num)
@@ -139,6 +156,54 @@ class Ledger:
     def received_count(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM transactions WHERE direction = 'IN'").fetchone()[0]
+
+    # ---- 보내기 (은행 → 허브) ----
+
+    def start_send(self, *, transfer_id: str, from_account: str, amount: int, to_bank: str, to_bank_name: str,
+                   to_account: str, to_name: str, memo: str) -> bool:
+        """한 트랜잭션에서 잔액 차감 + OUT(PENDING). 고객 계좌가 아니거나 잔액이 모자라면 아무것도 하지 않고 False."""
+        with self.transaction() as conn:
+            cur = conn.execute("UPDATE accounts SET balance = balance - ? WHERE account_num = ? AND balance >= ?",
+                               (amount, from_account, amount))
+            if cur.rowcount != 1:
+                return False
+            _insert_transaction(conn, account_num=from_account, direction="OUT", amount=amount,
+                                counterpart_bank=to_bank, counterpart_bank_name=to_bank_name,
+                                counterpart_account=to_account, counterpart_name=to_name, memo=memo,
+                                transfer_id=transfer_id, status="PENDING")
+        return True
+
+    def finish_send(self, transfer_id: str, status: str, fail_code: str | None = None,
+                    fail_message: str | None = None) -> bool:
+        """PENDING인 OUT을 COMPLETED 또는 FAILED로. FAILED면 같은 트랜잭션에서 환불한다.
+        이미 확정된 거래면 아무것도 하지 않고 False (조건부 UPDATE: 두 번 불려도 환불은 한 번)."""
+        if status not in ("COMPLETED", "FAILED"):
+            raise ValueError(status)
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE transactions SET status = ?, fail_code = ?, fail_message = ?, finished_at = ?"
+                " WHERE direction = 'OUT' AND transfer_id = ? AND status = 'PENDING'",
+                (status, fail_code, fail_message, now_iso(), transfer_id))
+            if cur.rowcount != 1:
+                return False
+            if status == "FAILED":
+                row = conn.execute("SELECT account_num, amount FROM transactions WHERE direction = 'OUT'"
+                                   " AND transfer_id = ?", (transfer_id,)).fetchone()
+                _add_balance(conn, row["account_num"], row["amount"])
+        return True
+
+    def sent(self, transfer_id: str) -> dict | None:
+        """OUT 거래 한 줄."""
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM transactions WHERE direction = 'OUT' AND transfer_id = ?",
+                                     (transfer_id,)).fetchone()
+        return dict(row) if row else None
+
+    def pending_sends(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM transactions WHERE direction = 'OUT' AND status = 'PENDING'"
+                                      " ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
 
     def reset(self) -> None:
         """장부를 처음 상태로: 거래 전부 지우고 고객 계좌를 시드 잔액으로 다시 넣는다. **테스트 전용** (`received.clear()`)."""

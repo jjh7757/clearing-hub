@@ -53,22 +53,32 @@
 - `POST /sim/api/inquiry`: 화면의 "받는 분 확인" 버튼용 (허브 3.2 그대로 전달).
 - `GET /sim/api/banks`: 허브 `GET /v1/banks`에서 902를 뺀 목록.
 - 허브 호출 서명은 `clearing_hub.core.signing.sign_ed25519(SIM_SIGNING_KEY, …)`, `X-Bank-Code: 902`. 허브 응답 서명은 `SIM_HUB_PUBLIC_KEY`로 검증한다 (SPEC 2.5. 검증 실패는 `PENDING`으로 두고 로그).
-- 새 환경 변수: `SIM_HUB_URL`(운영 `http://clearing-hub:8000`), `SIM_UI_PASSWORD`, `SIM_DB_PATH`.
+- 새 환경 변수: `SIM_HUB_URL`(운영 `http://clearing-hub:8000`), `SIM_API_KEY`(허브가 902에 준 API 키, 은행 → 허브 요청의 `X-Api-Key`, SPEC 2.1), `SIM_UI_PASSWORD`, `SIM_DB_PATH`, `SIM_BANK_CODE`(기본 902).
 - 테스트: 허브 앱을 ASGI로 붙여 902 → 901 송금이 끝까지 가는지 (conftest의 901·902 키 쌍 재사용), 잔액 부족·비밀번호 틀림·허브 FAILED 환불·202 뒤 refresh.
+
+**2단계 결과 (구현됨, `src/bank_sim/hub_client.py`, `main.py`의 `/sim/api/*`, `tests/test_bank_sim_send.py`)**
+
+- refresh는 계획의 `GET`이 아니라 **`POST /sim/api/transfers/{transfer_id}/refresh`** 다 (상태를 바꾸고 허브에 3.3을 다시 보낼 수 있는 호출이라).
+- 읽기 API `GET /sim/api/customers`(고객·계좌·잔액 한 번에), `GET /sim/api/accounts/{account_num}/transactions`를 이 단계에서 넣었다 (3단계의 `/customers/{index}/accounts` 대신).
+- 환불은 허브 본문 `status: "FAILED"`일 때만 (SPEC 3.3). `status` 없는 4xx·5xx·202·타임아웃·연결 오류·응답 서명 틀림은 `PENDING` 유지. 3.4가 `404 TRANSFER_NOT_FOUND`면 같은 `transfer_id`로 3.3을 다시 보낸다 (SPEC 3.4·6절 4-1).
+- 장부 `transactions`에 `fail_code`·`fail_message`·`finished_at` 칸과 OUT `transfer_id` 유일 인덱스를 더했다. 1단계 파일을 열면 칸을 붙인다 (`ALTER TABLE ADD COLUMN`).
+- 서버 재시작 때 `PENDING`을 자동으로 이어 확인하는 일(SPEC 6절 5)은 하지 않는다. 화면 폴링의 refresh가 그 역할을 한다.
 
 ### 3단계: 화면
 
 - `GET /` → 정적 HTML 한 장 (`src/bank_sim/static/index.html`, 허브 관리자 화면과 같은 방식: 바닐라 JS, 비밀번호는 탭 `sessionStorage`).
 - 고객 고르기(김철수·홍길동) → 계좌 카드(잔액) → 거래내역(받은 것은 보낸 은행·보낸 사람 이름, 보낸 것은 상태 배지) → 보내기 폼(받는 은행 선택, 계좌번호 3-3-6 자동 하이픈, "받는 분 확인", 금액, 보내기).
 - 5초 폴링으로 잔액·거래내역 갱신, `PENDING` 거래는 refresh 호출. 시연에서 AvengersBank 모아로 보낸 돈이 몇 초 뒤 여기 뜨는 장면이 핵심.
-- 읽기 API: `GET /sim/api/customers/{index}/accounts`, `GET /sim/api/accounts/{account_num}/transactions` (둘 다 비밀번호 필요).
+- 읽기 API (2단계에서 만듦): `GET /sim/api/customers`, `GET /sim/api/accounts/{account_num}/transactions` (둘 다 비밀번호 필요).
 - 0002~0006 시나리오 계좌는 화면에 보이지 않는다 (고객 계좌가 아니다).
 - 확인: launch.json에 `simbank-ui-8110` 항목(허브 devserver와 같이 띄워 실제 송금), 브라우저로 송금·수신 스크린샷.
 
 ### 4단계: 배포 (서버 작업, 사용자 허용 뒤 SSM)
 
 1. **사용자**: 가비아 DNS A `simbank` → `13.209.128.48`, `nslookup simbank.ai-agent-develop.cloud 8.8.8.8`로 전파 확인.
-2. `deploy/server-setup.sh`의 compose `sim`에 `volumes: ["./sim-data:/data"]`, `sim.env`에 `SIM_DB_PATH=/data/simbank.db`, `SIM_HUB_URL=http://clearing-hub:8000`, `SIM_UI_PASSWORD=<서버에서 생성>` 추가. 서버의 compose만 이 부분을 고친다 (`.env`·키는 건드리지 않는다).
+2. `deploy/server-setup.sh`의 compose `sim`에 `volumes: ["./sim-data:/data"]`, `sim.env`에 `SIM_DB_PATH=/data/simbank.db`, `SIM_HUB_URL=http://clearing-hub:8000`, `SIM_UI_PASSWORD=<서버에서 생성>`, `SIM_API_KEY=<아래 2-1>` 추가. 서버의 compose만 이 부분을 고친다 (`.env`·키는 건드리지 않는다).
+   - 2-1. **902 API 키**: 운영 902의 API 키는 지금 어디에도 없다(등록 때 한 번만 보여 주고 허브는 해시만 둔다). 서버 안에서 관리자 API `POST /admin/banks/902/keys`(`rotate_keys`)로 새로 받아 `sim.env`의 `SIM_API_KEY`에 바로 쓴다 (값은 화면·로그에 출력하지 않는다). 이 재발급은 **API 키 해시만** 바꾼다: 902 공개키·`SIM_SIGNING_KEY`·허브 키는 그대로라 셀프 시험·`/interbank` 서명에는 영향이 없다. 902 API 키를 쓰던 다른 곳은 없다 (지금까지 902는 허브를 부른 적이 없다).
+   - 2-2. 확인: sim 컨테이너 재시작 뒤 `GET /sim/api/banks`(헤더 `X-Sim-Password`)가 200이고 목록에 902가 없다. 401 `UNAUTHORIZED`가 `error`로 오면 API 키, `SIGNATURE_INVALID`면 902 공개키 등록을 본다 (허브 401·403은 화면에 502로 온다, 본문 `hub_status`).
 3. `/srv/caddy/Caddyfile`:
    ```
    simbank.ai-agent-develop.cloud {

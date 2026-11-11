@@ -152,11 +152,13 @@ def test_signature_hex():
 
 
 def test_signature_base64url():
-    for _ in range(50):  # 표준 base64에 + 나 / 가 있는 서명이 나올 때까지 (거의 항상 첫 번째)
-        f = bank_failure(encode=lambda raw: base64.urlsafe_b64encode(raw).decode())
+    # 표준 base64에 + 나 / 가 있는 서명이 나올 때까지 (약 93%는 첫 번째). Ed25519 서명은 같은 메시지면 같으므로
+    # 시각을 바꿔 다른 메시지로 다시 서명한다 (헤더만 바꾸면 서명과 어긋나 WRONG_KEY가 된다)
+    now = _now()
+    for i in range(50):
+        f = bank_failure(ts=str(now - i), encode=lambda raw: base64.urlsafe_b64encode(raw).decode())
         if "-" in f.headers_json["X-Signature"] or "_" in f.headers_json["X-Signature"]:
             break
-        f.headers_json["X-Timestamp"] = str(int(f.headers_json["X-Timestamp"]) + 1)
     assert_top(f, "SIGNATURE_BASE64URL")
 
 

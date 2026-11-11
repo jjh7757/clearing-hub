@@ -19,7 +19,7 @@ ed25519_public_of() {  # 개인키(raw base64) → 공개키(raw base64). DER �
     openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64
 }
 
-mkdir -p "$DIR"
+mkdir -p "$DIR" "$DIR/sim-data"
 chown ubuntu:ubuntu "$DIR"
 
 cat > "$DIR/docker-compose.yml" <<'EOF'
@@ -47,7 +47,8 @@ services:
       retries: 3
       start_period: 30s
 
-  # 가짜 은행. Caddy에 올리지 않는다: web 네트워크 안에서 허브만 http://clearing-hub-sim:8100/interbank 로 부른다
+  # 가짜 은행 SimBank. 허브는 web 네트워크 안에서 http://clearing-hub-sim:8100/interbank 로 부른다.
+  # 시연 화면(/)은 Caddy simbank.ai-agent-develop.cloud로 공개하고 /interbank/*는 막는다 (deploy/prepare-simbank.sh)
   sim:
     image: ${ECR_REGISTRY}/${APP_NAME}:${IMAGE_TAG:-latest}
     container_name: ${APP_NAME}-sim
@@ -55,6 +56,8 @@ services:
     command: ["uvicorn", "bank_sim.main:app", "--host", "0.0.0.0", "--port", "8100"]
     env_file:
       - sim.env
+    volumes:
+      - ./sim-data:/data  # SIM_DB_PATH=/data/simbank.db (장부)
     networks:
       - web
     expose:
@@ -115,6 +118,9 @@ SIM_SIGNING_KEY=$SIM_KEY
 # 허브 공개키 (GET /v1/hub-key). 비어 있으면 허브 서명 검증을 건너뛴다
 SIM_HUB_PUBLIC_KEY=$([ -n "$HUB_KEY" ] && ed25519_public_of "$HUB_KEY")
 SIM_DELAY_SECONDS=8
+# SimBank 시연 화면·보내기 (SIM_UI_PASSWORD·SIM_API_KEY는 deploy/prepare-simbank.sh가 넣는다)
+SIM_DB_PATH=/data/simbank.db
+SIM_HUB_URL=http://clearing-hub:8000
 EOF
   echo "902 공개키(등록용): $(ed25519_public_of "$SIM_KEY")"
   unset SIM_KEY HUB_KEY

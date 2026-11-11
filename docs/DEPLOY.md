@@ -133,6 +133,19 @@ curl -s -X POST https://clearing-hub.ai-agent-develop.cloud/admin/banks/902/ping
 
 `"ok":true`(`status` 200, `response_signature_valid` true)면 된다. `SIM_HUB_PUBLIC_KEY`가 비어 있으면 가짜 은행은 허브 서명 검증을 건너뛴다 (로컬 시험용. 운영에서는 채운다). `SIM_SIGNING_KEY`를 바꾸면 902 공개키도 같이 바꿔야 한다 (안 바꾸면 902로 가는 이체가 모두 `PENDING`).
 
+## SimBank 화면 배포
+
+SimBank(902) 시연 화면 `https://simbank.ai-agent-develop.cloud/` (잔액·거래내역·보내기, `docs/SIMBANK_PLAN.md`). 허브 코드와 DB는 바뀌지 않는다 (마이그레이션 없음).
+
+1. 가비아 DNS A `simbank` → `13.209.128.48`, `nslookup simbank.ai-agent-develop.cloud 8.8.8.8`로 확인
+2. `deploy/prepare-simbank.sh`를 서버 `/srv/clearing-hub/`에 두고 `sudo bash prepare-simbank.sh` (다시 실행해도 안전). 하는 일: `sim-data` 폴더, compose sim 볼륨 `./sim-data:/data`, `sim.env`에 `SIM_DB_PATH`·`SIM_HUB_URL`·`SIM_UI_PASSWORD`(생성, `/srv/clearing-hub/simbank-password.txt`에만)·`SIM_API_KEY`(`POST /admin/banks/902/keys` 재발급. API 키 해시만 바뀌고 902 공개키·셀프 시험은 그대로), Caddy 블록(`/interbank/*`·`/docs`·`/openapi.json`은 404) reload, 902 예치금 출력. 컨테이너는 다시 만들지 않는다
+3. Caddy 적용 확인: `docker logs caddy 2>&1 | grep simbank`에 `certificate obtained successfully`
+4. `main` push → Actions → `deploy-app`이 sim 컨테이너를 새 이미지·볼륨·sim.env로 다시 만든다
+5. 확인: `https://simbank.ai-agent-develop.cloud/` 200(화면), `/health` 200 JSON, `/interbank/inquiry` 404. 화면에서 비밀번호 입력 → 고객 김철수 → AvengersBank 시연 계좌로 1만 원 보내기 `완료`, AvengersBank 모아로 "SimBank 110-123-0001로 1만 원" → SimBank 화면에 "방금 입금". `docker restart clearing-hub-sim` 뒤에도 잔액 유지
+6. 시연 비밀번호 보기: `sudo cat /srv/clearing-hub/simbank-password.txt`. 바꾸기: `sim.env`의 `SIM_UI_PASSWORD`를 고치고 같은 태그로 `deploy-app` (위 "가짜 은행 연결"의 재생성 명령)
+
+보내기는 902의 순채무한도를 쓴다. 한도가 모자라면 보내기와 셀프 시험이 함께 막히므로 `POST /admin/reserve/902/deposit`으로 예치한다.
+
 ## 참가 은행 등록
 
 새 팀은 **초대 코드로 셀프 등록**한다. 관리자 일은 초대 코드와 허브 공개키 지문을 보내는 것뿐이다: [ONBOARDING.md](ONBOARDING.md).

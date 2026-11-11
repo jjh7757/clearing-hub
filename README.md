@@ -2,6 +2,69 @@
 
 은행 간 이체 중계 서버: 참가 은행들이 허브 하나만 부르면 서로 이체할 수 있게 하고, 거래를 기록·추적·정산한다. FastAPI + SQLAlchemy(async) + PostgreSQL.
 
+## 요약 (1분)
+
+실제 금융망에서 **금융결제원(중계)** 과 **한국은행 당좌예금(정산)** 이 하는 일을 부트캠프 규모로 만든 서버다. 여러 팀이 따로 만든 은행 서버가 규격 하나만 지키면 서로 돈을 보낼 수 있고, 허브가 그 거래를 중계·기록하고 하루 단위로 정산한다.
+
+**풀려는 문제**: 타은행 이체는 출금(보내는 은행 DB)과 입금(받는 은행 DB)이 서로 다른 DB에서 일어나 한 트랜잭션으로 묶을 수 없다. 중간에 끊기면 돈이 사라지거나 두 번 들어가고, 받는 은행이 "입금했다"고 답하는 것 말고는 증거가 없다.
+
+| 문제 | 해결 | 코드 |
+|---|---|---|
+| 은행이 N개면 연동이 N×(N−1)개 | 모든 은행이 허브만 부른다. 연동 규격 문서 하나, 초대 코드로 셀프 등록 | [docs/SPEC.md](docs/SPEC.md), `domains/banks/` |
+| 응답이 끊기면 돈이 사라지거나 두 번 들어간다 | `transfer_id` 멱등 + 상태 머신. 받는 은행이 5초 안에 답하지 않으면 `PENDING`으로 두고, 1분마다 최대 10회 결과를 확인한다 | `domains/transfers/`, `workers/retry.py` |
+| 누가 보냈는지 모르고, 나중에 부인할 수 있다 | 요청과 응답 모두 Ed25519 서명. 허브는 은행의 개인키를 갖지 않고, 서명된 원문을 증거로 보관한다 | `core/signing.py`, `transfers/evidence.py` |
+| 받는 은행이 먼저 내준 돈이 갚아지지 않는다 | 매일 00:05(KST)에 하루치 거래를 은행마다 차액 하나로 상계해 예치금 원장에서 옮긴다 | `domains/settlement/`, `domains/reserve/` |
+| 갚을 수 없는 만큼 보낼 수 있다 | 접수할 때 `미정산 순채무 + 금액 > 예치금 + 한도`면 `LIMIT_EXCEEDED`로 거절 | `transfers/exposure.py` |
+| 입금하지 않고 "완료"라고 답할 수 있다 | 은행이 허브 기록을 자기 장부와 대사해, 확정 전에 어긋난 거래를 찾아낸다 | `/v1/settlements`, [DEMO 8절](docs/DEMO.md) |
+
+- **스택**: Python 3.13, FastAPI, SQLAlchemy(async), PostgreSQL, Alembic, httpx, Docker
+- **검증**: pytest 346개 (SQLite로 돌아 PostgreSQL 없이 실행). 이체 성공·실패·멱등·타임아웃·재시도, 정산·대사, 부인방지, 시연 시나리오 전체
+- **배포**: `main` push → GitHub Actions(테스트 → arm64 이미지 → ECR) → AWS EC2. 장기 액세스 키 없이 OIDC
+- **연동한 은행**: [AvengersBank](https://github.com/jjh7757/avengers-bank)(901, 첫 참가 은행), SimBank(902, 이 저장소의 가짜 은행), Node.js 참고 구현([examples/node-bank](examples/node-bank))
+- **바로 보기**: [API 문서](https://clearing-hub.ai-agent-develop.cloud/docs) · [SimBank 시연 화면](https://simbank.ai-agent-develop.cloud/)(조회·보내기는 시연 비밀번호 필요) · [시연 대본](docs/DEMO.md) · 로컬에서는 `uv run python -m clearing_hub.devserver` 한 줄 ([아래](#로컬에서-한-명령으로-postgresql-없이))
+
+## 타은행 이체 흐름
+
+실제 타은행 이체는 두 단계로 나뉜다. 고객 화면에서는 몇 초 만에 끝나지만, **은행 사이의 실제 돈은 영업 마감 뒤 중앙은행에서 차액만 한 번에 옮겨진다.** ClearingHub는 이 흐름에서 중앙허브(금융결제원)와 중앙은행 지급준비금 계좌의 역할을 맡는다.
+
+```mermaid
+sequenceDiagram
+    actor C as 철수
+    participant A as 은행 A<br/>(AvengersBank 901)
+    participant H as 중앙허브<br/>(ClearingHub)
+    participant B as 은행 B<br/>(SimBank 902)
+    participant R as 중앙은행 예치금<br/>(ClearingHub reserve)
+
+    rect rgba(66, 133, 244, 0.12)
+    Note over C,B: 실시간 처리 (수 초)
+    C->>A: ① 영희(은행 B)에게 10만 원 이체 요청
+    A->>H: ② 철수 잔액 −10만 원, 이체 전문 전송
+    H->>B: ③ 전문 중계, "A가 B에 10만 원 줄 것" 기록
+    B-->>H: ④ 영희 잔액 +10만 원 즉시 입금 (은행 B는 아직 돈을 받지 못함)
+    H-->>A: 완료 응답
+    end
+
+    rect rgba(52, 168, 83, 0.12)
+    Note over H,R: 영업 마감 후 정산
+    H->>H: ⑤ 하루치 거래를 상계해 은행별 차액 계산
+    H->>R: 결제 지시
+    R->>R: ⑥ A 예치금 −10만 원, B 예치금 +10만 원
+    end
+```
+
+| 단계 | 실제 금융망 | 이 저장소 |
+|---|---|---|
+| ① | 고객이 은행 A 앱에서 이체 요청 | 참가 은행의 화면 (AvengersBank 타행 이체, SimBank 보내기) |
+| ② | 은행 A가 출금하고 중앙허브로 전문 전송 | 은행 → `POST /v1/transfers` (Ed25519 서명, `transfer_id`로 멱등). 허브가 순채무한도를 검사하고 `ACCEPTED` |
+| ③ | 중앙허브가 은행 B로 중계하고 "A가 B에 줄 돈"을 기록 | 허브 → `POST /interbank/receive`, `transfers`·`transfer_events`에 기록 |
+| ④ | 은행 B가 받는 고객에게 즉시 입금 | 받는 은행이 서명한 `COMPLETED` 응답. 응답이 없으면 `PENDING` → 재시도 태스크가 확인 |
+| ⑤ | 중앙허브가 하루치를 상계해 차액을 계산하고 중앙은행에 결제 요청 | `workers/settlement.py`가 매일 00:05(KST)에 정산 DRAFT를 만든다 (다자간 차액, 합은 0). 은행은 `GET /v1/settlements/{run_id}`로 대사 |
+| ⑥ | 중앙은행이 지급준비금 계좌에서 A → B로 옮겨 정산 완료 | 확정하면 `domains/reserve/`가 예치금 잔액을 옮기고 `reserve_ledger`에 분개를 남긴다 |
+
+①~④에서 은행 B는 돈을 받지 않은 채 고객에게 먼저 내준다. 이 외상을 믿을 수 있게 하는 장치가 위 요약의 서명·순채무한도·대사다. 실제 돈은 움직이지 않고, ⑥은 허브 DB의 모의 예치금 숫자를 옮기는 데서 끝난다. 자세한 설계는 [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md).
+
+## 문서
+
 | 문서 | 내용 |
 |---|---|
 | [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) | 계획서: 배경, 구조, 데이터 모델, 일정, 리스크 |
@@ -10,6 +73,7 @@
 | [docs/ONBOARDING.md](docs/ONBOARDING.md) | 허브 관리자용: 새 팀에 초대 코드 보내기, 등록 확인, 예치금·키 문제, 문제가 생겼을 때 보는 곳, 401 문의 (연동 진단) |
 | [docs/SETTLEMENT_PLAN.md](docs/SETTLEMENT_PLAN.md) | 정산 계획서: 예치금 원장, 순채무한도, 마감 상계, 대사, 확정, 부인방지(12절) |
 | [docs/DEMO.md](docs/DEMO.md) | 시연 대본: 예치 → 한도 → 하루치 → 상계 → 대사 → 확정 → 속이는 은행 (curl과 기대 숫자) |
+| [docs/SIMBANK_PLAN.md](docs/SIMBANK_PLAN.md) | SimBank(902) 시연 화면 계획: 잔액·거래내역·보내기 |
 
 ## 구조
 

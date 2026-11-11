@@ -144,6 +144,8 @@ SimBank(902) 시연 화면 `https://simbank.ai-agent-develop.cloud/` (잔액·�
 5. 확인: `https://simbank.ai-agent-develop.cloud/` 200(화면), `/health` 200 JSON, `/interbank/inquiry` 404. 화면에서 비밀번호 입력 → 고객 김철수 → AvengersBank 시연 계좌로 1만 원 보내기 `완료`, AvengersBank 모아로 "SimBank 110-123-0001로 1만 원" → SimBank 화면에 "방금 입금". `docker restart clearing-hub-sim` 뒤에도 잔액 유지
 6. 시연 비밀번호 보기: `sudo cat /srv/clearing-hub/simbank-password.txt`. 바꾸기: `sim.env`의 `SIM_UI_PASSWORD`를 고치고 같은 태그로 `deploy-app` (위 "가짜 은행 연결"의 재생성 명령)
 
+**배포 기록 (2026-11-11)**: `prepare-simbank.sh` 실행(902 API 키 재발급, Caddy 인증서 발급) → main `ccdfa76` 배포(첫 push `f39e7f5`는 `test_signature_doctor`의 간헐 실패로 테스트 단계에서 멈춤, 테스트를 고쳐 다시 push). 확인: `/` 200, `/health` 200, `/interbank/inquiry`·`/docs` 404, 서버에서 902 김철수 → 901 `110-901-000001`(테스트수취) 1만 원 `COMPLETED`, `docker restart clearing-hub-sim` 뒤 잔액 990,000원 유지, 902 ping `ok`(응답 서명 유효).
+
 보내기는 902의 순채무한도를 쓴다. 한도가 모자라면 보내기와 셀프 시험이 함께 막히므로 `POST /admin/reserve/902/deposit`으로 예치한다.
 
 ## 참가 은행 등록

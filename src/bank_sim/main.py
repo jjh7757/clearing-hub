@@ -26,6 +26,7 @@
   SIM_API_KEY         허브가 902에 준 API 키 (X-Api-Key)
   SIM_UI_PASSWORD     `/sim/api/*`의 `X-Sim-Password`. 비어 있으면 모두 403(기능 꺼짐), 틀리면 401
   SIM_BANK_CODE       이 은행 코드 (기본 902)
+화면: `GET /` (시연 화면, src/bank_sim/static/), `GET /sim/static/{app.js,app.css}`. 상태 JSON은 `GET /health`
 실행: SIM_SIGNING_KEY=<개인키> uv run uvicorn bank_sim.main:app --port 8100
 """
 
@@ -35,14 +36,16 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from clearing_hub.admin_ui.router import SECURITY_HEADERS
 from clearing_hub.core.ci import virtual_ci
 from clearing_hub.core.log_setup import configure_logging
 from clearing_hub.core.response_signing import ResponseSigningMiddleware
@@ -220,8 +223,29 @@ async def accounts(data: AccountsRequest):
     return {"accounts": []}  # 고객이 없어도 빈 목록 (고객 존재 여부를 드러내지 않는다)
 
 
-@app.get("/")
+# ---- 화면 (`GET /` = 시연 화면 한 장, `/sim/static/*`) ----
+# 페이지에는 데이터·비밀번호가 없어 인증 없이 준다. 화면이 시연 비밀번호를 `X-Sim-Password`로 붙여 `/sim/api/*`를 부른다.
+# 허브 관리자 화면과 같은 보안 헤더(CSP self, 인라인 스크립트 없음). 운영 헬스체크는 `GET /`의 200만 본다.
+
+STATIC = Path(__file__).parent / "static"
+STATIC_FILES = {"app.js": "text/javascript; charset=utf-8", "app.css": "text/css; charset=utf-8"}
+
+
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)  # HEAD: 업타임 점검 도구용
 async def root():
+    return FileResponse(STATIC / "index.html", media_type="text/html; charset=utf-8", headers=SECURITY_HEADERS)
+
+
+@app.get("/sim/static/{name}", include_in_schema=False)
+async def static_file(name: str):
+    if name not in STATIC_FILES:  # 정해 둔 파일만 (경로 탐색 없음)
+        return _error(404, "NOT_FOUND", "없는 파일입니다")
+    return FileResponse(STATIC / name, media_type=STATIC_FILES[name], headers=SECURITY_HEADERS)
+
+
+@app.get("/health")
+async def health():
+    """상태 확인 JSON (예전 `GET /`의 응답)."""
     return {"service": "BankSim", "received": ledger.received_count()}
 
 

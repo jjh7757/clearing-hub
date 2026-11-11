@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>SimBank</title>
+  <link rel="stylesheet" href="/sim/static/app.css">
+  <script src="/sim/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">S</span>
+      <div>
+        <h1 id="bank-title">SimBank</h1>
+        <p class="tagline">시연용 은행 · ClearingHub 참가 은행</p>
+      </div>
+    </div>
+    <button id="logout" type="button" class="ghost light" hidden>잠그기</button>
+  </header>
+
+  <main>
+    <section id="login" class="card narrow" hidden>
+      <h2>시연 비밀번호</h2>
+      <p class="muted">이 탭에만 기억합니다. 탭을 닫으면 지워집니다.</p>
+      <form id="login-form">
+        <input id="password" type="password" autocomplete="off" spellcheck="false" placeholder="시연 비밀번호" required>
+        <button type="submit">열기</button>
+      </form>
+      <p id="login-error" class="error" hidden></p>
+    </section>
+
+    <section id="disabled" class="card narrow" hidden>
+      <h2>시연 기능 꺼짐</h2>
+      <p class="muted">이 서버에는 시연 비밀번호(<code>SIM_UI_PASSWORD</code>)가 설정되어 있지 않아 화면을 쓸 수 없습니다.</p>
+    </section>
+
+    <div id="app" hidden>
+      <p id="flash" class="flash" hidden></p>
+
+      <section class="customers" aria-label="고객 고르기">
+        <span class="muted small">고객</span>
+        <div id="customer-tabs" class="tabs" role="tablist"></div>
+        <span class="muted small live" id="updated"></span>
+      </section>
+
+      <section id="accounts" class="accounts" aria-label="계좌"></section>
+
+      <div class="columns">
+        <section class="card">
+          <h2>거래내역 <span id="tx-account" class="muted small"></span></h2>
+          <ul id="transactions" class="txlist"></ul>
+          <p id="tx-empty" class="muted" hidden>아직 거래가 없습니다.</p>
+        </section>
+
+        <section class="card">
+          <h2>보내기</h2>
+          <form id="send-form" autocomplete="off">
+            <label>보내는 계좌
+              <select id="from-account" required></select>
+            </label>
+            <label>받는 은행
+              <select id="to-bank" required>
+                <option value="">불러오는 중…</option>
+              </select>
+            </label>
+            <label>받는 계좌번호
+              <div class="row">
+                <input id="to-account" inputmode="numeric" placeholder="000-000-000000" maxlength="20" required>
+                <button id="inquiry" type="button" class="secondary">받는 분 확인</button>
+              </div>
+            </label>
+            <p id="holder" class="holder" hidden></p>
+            <label>금액
+              <div class="amount">
+                <input id="amount" inputmode="numeric" placeholder="0" maxlength="9" required>
+                <span>원</span>
+              </div>
+            </label>
+            <label>메모 <span class="muted small">(받는 분 통장에 표시)</span>
+              <input id="memo" maxlength="20" placeholder="예: 점심값">
+            </label>
+            <button id="send" type="submit" disabled>보내기</button>
+            <p id="send-result" class="result" hidden></p>
+          </form>
+        </section>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

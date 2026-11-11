@@ -73,6 +73,13 @@
 - 0002~0006 시나리오 계좌는 화면에 보이지 않는다 (고객 계좌가 아니다).
 - 확인: launch.json에 `simbank-ui-8110` 항목(허브 devserver와 같이 띄워 실제 송금), 브라우저로 송금·수신 스크린샷.
 
+**3단계 결과 (구현됨, `src/bank_sim/static/`, `main.py`의 화면 경로, `tests/test_bank_sim_ui.py`)**
+
+- `GET /`(HEAD도) = 화면 HTML, 스크립트·스타일은 `GET /sim/static/app.js`·`app.css`만 (정해 둔 이름 외 404). 허브 관리자 화면과 같은 `SECURITY_HEADERS`(CSP self)를 그대로 가져다 쓴다. 예전 `GET /` JSON(`service`, `received`)은 **`GET /health`** 로 옮겼다. compose 헬스체크(`/`의 200)는 그대로 된다.
+- 화면: 비밀번호(탭 sessionStorage, 401 → 다시 묻기, 403 FORBIDDEN → "시연 기능 꺼짐") → 고객 탭 → 계좌 카드 → 거래내역 → 보내기(받는 분 확인 뒤에만 보내기, 계좌번호 3-3-나머지 자동 하이픈, 금액 쉼표, 화면 상한 1,000,000원). 5초 폴링은 고른 고객의 계좌를 모두 읽고 `PENDING`은 refresh(한 번에 5건까지). 처음 읽은 뒤 새로 생긴 입금은 8초 동안 카드·줄 강조 + 아래 알림.
+- 로컬 상대 은행: devserver `--peer-port N`이 **903 PeerBank**(같은 bank_sim 코드, 별도 프로세스, 메모리 장부)를 등록·기동한다. 902 → 903 보내기, 903 화면(또는 `/sim/api/transfers`)에서 902로 보내 입금 장면을 시험한다. devserver는 이제 `SIM_HUB_URL`(이 허브)과, 없으면 902 API 키를 시작 때 재발급해 `SIM_API_KEY`로 넣는다. launch.json `simbank-ui-8110`(허브 8012, SimBank 8110, PeerBank 8111, 비밀번호 `simbank-demo`).
+- 4단계 주의: Caddy는 `/interbank/*`만 막고 `/`, `/sim/static/*`, `/sim/api/*`, `/health`는 통과시킨다 (`/docs`·`/openapi.json`도 공개되니 막고 싶으면 같이 `respond 404`). 화면은 CDN 없이 같은 출처만 부른다.
+
 ### 4단계: 배포 (서버 작업, 사용자 허용 뒤 SSM)
 
 1. **사용자**: 가비아 DNS A `simbank` → `13.209.128.48`, `nslookup simbank.ai-agent-develop.cloud 8.8.8.8`로 전파 확인.

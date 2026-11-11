@@ -2,6 +2,7 @@
 
     uv run python -m clearing_hub.devserver            (종료: Ctrl+C)
     uv run python -m clearing_hub.devserver --hub-port 8001 --sim-port 8101
+    uv run python -m clearing_hub.devserver --peer-port 8111   (SimBank 화면에서 보낼 상대 은행 903도 띄운다)
 
 PostgreSQL·Alembic 없이 돈다. 처음 실행하면 아래를 만들어 `.env.dev`(현재 폴더)에 저장하고, 다음 실행 때 다시 쓴다.
   ADMIN_TOKEN       관리 API 토큰 (X-Admin-Token)
@@ -17,6 +18,11 @@ PostgreSQL·Alembic 없이 돈다. 처음 실행하면 아래를 만들어 `.env
 - 은행 `base_url`은 `http://127.0.0.1:3000/interbank`처럼 http여도 된다. 허브는 원래 `base_url`의 https를 강제하지
   않는다(형식만 본다). 운영 허브에 등록할 때는 SPEC 3.5·7절대로 공개 HTTPS 주소를 쓴다
 - 시작할 때마다 902가 없으면 등록하고 예치금 1,000만 원을 넣은 뒤, 새 초대 코드를 하나 만들어 초대 문구를 출력한다
+- SimBank 화면(`http://127.0.0.1:8100/`)이 허브를 부를 수 있게 `SIM_HUB_URL`을 이 허브로 두고, `SIM_API_KEY`가 없으면
+  시작할 때마다 902의 API 키를 새로 받아(rotate) 넣는다 (환경 변수에 이미 있으면 그 값). 화면을 쓰려면 `SIM_UI_PASSWORD`를
+  환경 변수로 준다 (없으면 화면 API는 403 "시연 기능 꺼짐"). `SIM_DB_PATH`를 주면 장부가 그 파일에 남는다
+- `--peer-port`를 주면 상대 은행 903 PeerBank(같은 bank_sim 코드, 메모리 장부, 별도 프로세스)도 띄워 등록한다.
+  902 → 903 보내기와, 903 화면(`http://127.0.0.1:<peer-port>/`)에서 902로 보내기를 로컬에서 시험할 수 있다
 
 가짜 은행의 계좌번호 끝 4자리: 0001 정상, 0002 계좌 없음, 0003 지연, 0004 5xx 두 번 뒤 성공, 0005 입금 후 응답 없음,
 0006 입금하지 않고 200 (README "가짜 은행과 함께 돌려 보기").
@@ -28,6 +34,7 @@ import logging
 import os
 import secrets
 import signal
+import subprocess
 import sys
 from collections.abc import MutableMapping
 from contextlib import contextmanager
@@ -41,6 +48,7 @@ HOST = "127.0.0.1"
 HUB_PORT, SIM_PORT = 8000, 8100
 SIM_BANK_CODE, SIM_BANK_NAME = "902", "SimBank"
 SIM_DEPOSIT = 10_000_000  # 902 예치금 1,000만 원: 셀프 시험(902 명의로 보내는 이체)이 한도에 걸리지 않게
+PEER_BANK_CODE, PEER_BANK_NAME = "903", "PeerBank"  # --peer-port: SimBank 화면에서 보낼 로컬 상대 은행
 GENERATED_KEYS = ("ADMIN_TOKEN", "HUB_SIGNING_KEY", "SIM_SIGNING_KEY")
 
 logger = logging.getLogger("clearing_hub.devserver")
@@ -107,27 +115,38 @@ async def create_tables() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def ensure_sim_bank(sim_public_key: str, sim_base_url: str) -> bool:
-    """902가 없으면 등록하고 예치금을 넣는다 (True). 있으면 base_url·공개키만 지금 값으로 맞춘다 (False)."""
+async def ensure_sim_bank(sim_public_key: str, sim_base_url: str, bank_code: str = SIM_BANK_CODE,
+                          name: str = SIM_BANK_NAME) -> bool:
+    """902가 없으면 등록하고 예치금을 넣는다 (True). 있으면 base_url·공개키만 지금 값으로 맞춘다 (False).
+    `--peer-port`의 903도 같은 함수로 등록한다."""
     from clearing_hub.core.database import SessionLocal
     from clearing_hub.domains.banks import service as bank_service
     from clearing_hub.domains.banks.schemas import BankCreate
     from clearing_hub.domains.reserve import service as reserve_service
 
     async with SessionLocal() as db, db.begin():
-        bank = await bank_service.get_bank(db, SIM_BANK_CODE)
+        bank = await bank_service.get_bank(db, bank_code)
         if bank is None:
-            await bank_service.register_bank(db, BankCreate(bank_code=SIM_BANK_CODE, name=SIM_BANK_NAME,
+            await bank_service.register_bank(db, BankCreate(bank_code=bank_code, name=name,
                                                             base_url=sim_base_url, public_key=sim_public_key))
-            await reserve_service.deposit(db, SIM_BANK_CODE, SIM_DEPOSIT, memo="devserver 초기 예치금")
+            await reserve_service.deposit(db, bank_code, SIM_DEPOSIT, memo="devserver 초기 예치금")
             return True
         if bank.base_url != sim_base_url:  # 포트를 바꿔 띄운 경우
             bank.base_url = sim_base_url
         if bank.public_key != sim_public_key:  # .env.dev를 새로 만든 경우
-            await bank_service.admin_register_public_key(db, SIM_BANK_CODE, sim_public_key)
+            await bank_service.admin_register_public_key(db, bank_code, sim_public_key)
         if not bank.active:
             bank.active = True
         return False
+
+
+async def new_api_key(bank_code: str) -> str:
+    """은행의 API 키를 새로 받는다 (관리자 `POST /admin/banks/{code}/keys`와 같음). 가짜 은행이 허브를 부를 때 쓴다."""
+    from clearing_hub.core.database import SessionLocal
+    from clearing_hub.domains.banks import service as bank_service
+
+    async with SessionLocal() as db, db.begin():
+        return (await bank_service.rotate_keys(db, bank_code))[1]
 
 
 async def new_invite_message(hub_url: str, note: str = "devserver") -> str:
@@ -141,14 +160,19 @@ async def new_invite_message(hub_url: str, note: str = "devserver") -> str:
     return invite_message(invite.code, invite.expires_at, hub_url)
 
 
-def banner(environ: MutableMapping[str, str], invite: str, hub_port: int, sim_port: int) -> str:
+def banner(environ: MutableMapping[str, str], invite: str, hub_port: int, sim_port: int,
+           peer_port: int | None = None) -> str:
     """시작이 끝나면 콘솔에 출력할 안내. 로컬 전용이라 관리자 토큰도 보여 준다."""
     rule = "=" * 72
+    ui = "" if environ.get("SIM_UI_PASSWORD") else "  (SIM_UI_PASSWORD 없음 → 화면 API 꺼짐)"
+    peer = [f"- 상대 은행:  http://{HOST}:{peer_port}/  (903 PeerBank 화면, 메모리 장부, 받을 계좌 110-123-0001)"] if peer_port else []
     return "\n".join([
         rule,
         "ClearingHub 로컬 개발 서버 (운영과 다름: SQLite·create_all, 정산 배치·알림 꺼짐, http base_url 허용)",
         f"- 허브:       http://{HOST}:{hub_port}   (API 문서 http://{HOST}:{hub_port}/docs)",
         f"- 가짜 은행:  http://{HOST}:{sim_port}/interbank  (902 SimBank, 받을 계좌 110-123-0001 = 김철수)",
+        f"- SimBank 화면: http://{HOST}:{sim_port}/{ui}",
+        *peer,
         f"- DB:         {environ['DATABASE_URL']}",
         f"- 관리자 토큰 (X-Admin-Token): {environ['ADMIN_TOKEN']}",
         "- 내 은행 base_url 예: http://127.0.0.1:3000/interbank  (로컬만. 운영은 공개 HTTPS, SPEC 3.5)",
@@ -173,16 +197,39 @@ def _server(app, port: int):
     return Server(uvicorn.Config(app, host=HOST, port=port, log_config=None, lifespan="on"))
 
 
-async def serve(hub_port: int = HUB_PORT, sim_port: int = SIM_PORT) -> None:
-    from bank_sim.main import app as sim_app
-    from clearing_hub.main import app as hub_app
+async def start_peer_bank(hub_url: str, peer_port: int) -> subprocess.Popen:
+    """상대 은행 903을 등록하고 별도 프로세스로 띄운다 (bank_sim은 은행 설정을 프로세스 환경 변수에서 읽어 한 프로세스에
+    두 은행을 둘 수 없다). 키는 실행마다 새로 만들고 공개키를 다시 등록한다. 장부는 메모리 (재시작하면 처음부터)."""
+    peer_key = generate_keypair()[0]
+    if await ensure_sim_bank(public_key_of(peer_key), f"http://{HOST}:{peer_port}/interbank", PEER_BANK_CODE,
+                             PEER_BANK_NAME):
+        logger.info("상대 은행 903을 등록하고 예치금 %s원을 넣었다", f"{SIM_DEPOSIT:,}")
+    env = {**os.environ, "SIM_SIGNING_KEY": peer_key, "SIM_BANK_CODE": PEER_BANK_CODE, "SIM_HUB_URL": hub_url,
+           "SIM_API_KEY": await new_api_key(PEER_BANK_CODE), "SIM_DB_PATH": ""}
+    return _spawn_bank_sim(peer_port, env)
 
+
+def _spawn_bank_sim(port: int, env: dict[str, str]) -> subprocess.Popen:
+    """bank_sim을 자식 프로세스로 띄운다 (바로 돌아온다. 종료는 serve()의 finally)."""
+    return subprocess.Popen([sys.executable, "-m", "uvicorn", "bank_sim.main:app", "--host", HOST,
+                             "--port", str(port), "--log-level", "warning"], env=env)
+
+
+async def serve(hub_port: int = HUB_PORT, sim_port: int = SIM_PORT, peer_port: int | None = None) -> None:
     hub_url, sim_base_url = f"http://{HOST}:{hub_port}", f"http://{HOST}:{sim_port}/interbank"
     logger.warning("로컬 개발 서버: 테이블을 Alembic이 아니라 create_all로 만든다 (운영과 다름). 정산 배치·알림은 꺼져 있다")
     await create_tables()
     if await ensure_sim_bank(public_key_of(os.environ["SIM_SIGNING_KEY"]), sim_base_url):
         logger.info("가짜 은행 902를 등록하고 예치금 %s원을 넣었다", f"{SIM_DEPOSIT:,}")
     invite = await new_invite_message(hub_url)
+    # SimBank 화면·보내기(/sim/api)가 이 허브를 부르게 한다. bank_sim은 요청마다 환경 변수를 읽는다
+    os.environ.setdefault("SIM_HUB_URL", hub_url)
+    if not os.environ.get("SIM_API_KEY"):
+        os.environ["SIM_API_KEY"] = await new_api_key(SIM_BANK_CODE)
+    peer = await start_peer_bank(hub_url, peer_port) if peer_port else None
+
+    from bank_sim.main import app as sim_app
+    from clearing_hub.main import app as hub_app
 
     servers = [_server(hub_app, hub_port), _server(sim_app, sim_port)]
 
@@ -199,18 +246,22 @@ async def serve(hub_port: int = HUB_PORT, sim_port: int = SIM_PORT) -> None:
                 break
             await asyncio.sleep(0.1)
         else:
-            print(banner(os.environ, invite, hub_port, sim_port), flush=True)
+            print(banner(os.environ, invite, hub_port, sim_port, peer_port), flush=True)
         await asyncio.gather(*tasks)
     finally:
         stop()  # 출력 중 오류 등으로 빠져나와도 두 서버를 정상 종료(lifespan shutdown)한다
         await asyncio.gather(*tasks, return_exceptions=True)
         signal.signal(signal.SIGINT, previous)
+        if peer is not None:
+            peer.terminate()
+            peer.wait(timeout=10)
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="허브와 가짜 은행 902를 로컬에서 함께 띄운다 (개발 전용)")
     parser.add_argument("--hub-port", type=int, default=HUB_PORT)
     parser.add_argument("--sim-port", type=int, default=SIM_PORT)
+    parser.add_argument("--peer-port", type=int, default=None, help="상대 은행 903 PeerBank도 이 포트로 띄운다")
     args = parser.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # Windows에서 파일로 돌리면 cp949라 한글·기호 출력이 깨지거나 죽는다
         if hasattr(stream, "reconfigure"):
@@ -219,7 +270,7 @@ def main(argv: list[str] | None = None) -> None:
     from clearing_hub.core.log_setup import configure_logging
 
     configure_logging()
-    asyncio.run(serve(args.hub_port, args.sim_port))
+    asyncio.run(serve(args.hub_port, args.sim_port, args.peer_port))
 
 
 if __name__ == "__main__":

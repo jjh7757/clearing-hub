@@ -93,6 +93,7 @@ uv run python -m clearing_hub.devserver
 - 시작할 때 `902`가 없으면 등록하고 예치금 1,000만 원을 넣은 뒤, **새 초대 코드를 만들어 초대 문구를 콘솔에 출력**한다 (관리자 토큰, 허브 주소, 초대 코드, 허브 공개키·지문). 이것으로 [SPEC "빠른 시작"](docs/SPEC.md)을 그대로 따라 한다
 - 내 은행의 `base_url`은 `http://127.0.0.1:3000/interbank`처럼 http로 등록해도 된다 (허브는 `base_url`의 https를 강제하지 않는다. 운영 허브에는 SPEC 3.5대로 공개 HTTPS)
 - 초대 코드가 더 필요하면: `curl -X POST http://127.0.0.1:8000/admin/invites -H "X-Admin-Token: <콘솔의 토큰>"`
+- SimBank 시연 화면: `SIM_UI_PASSWORD=<아무 값>`을 주고 띄우면 `http://127.0.0.1:8100/`에서 고객 잔액·거래내역·보내기를 쓴다 (`GET /health`가 예전 JSON). `--peer-port 8111`을 붙이면 보낼 상대 은행 903 PeerBank도 함께 뜬다
 
 운영과 다른 점: 테이블을 Alembic이 아니라 `Base.metadata.create_all`로 만든다(Alembic의 FK 추가가 SQLite에서 되지 않는다), 정산 일일 배치(`SETTLEMENT_WORKER_ENABLED=false`)와 알림 웹훅이 꺼져 있다. 환경 변수에 이미 있는 값(`DATABASE_URL` 등)이 `.env.dev`보다 먼저다.
 

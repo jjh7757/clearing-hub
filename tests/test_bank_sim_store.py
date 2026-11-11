@@ -124,7 +124,7 @@ async def test_receive_endpoint_updates_balance_once(sim_client):
     assert sim.ledger.balance(KIM) == INITIAL_BALANCE + 10_000
     status = await sim_client.get(f"/interbank/receive/{body['transfer_id']}")
     assert status.status_code == 200 and status.json()["holder_name"] == "김철수" and status.json()["received_at"]
-    assert (await sim_client.get("/")).json() == {"service": "BankSim", "received": 1}
+    assert (await sim_client.get("/health")).json() == {"service": "BankSim", "received": 1}
 
 
 async def test_receive_endpoint_0006_leaves_no_trace(sim_client):

@@ -3,7 +3,13 @@
 계좌번호 끝 4자리로 동작을 고른다 (PROJECT_PLAN 3.5).
   0001 정상 입금 · 0002 계좌 없음 · 0003 지연(허브 타임아웃) · 0004 500 두 번 뒤 성공 · 0005 입금은 됐는데 응답 안 함
   0006 입금하지 않고 200 COMPLETED (속이는 은행, 대사 시연용. SETTLEMENT_PLAN 9절 8)
-그 밖의 번호는 정상 입금. 저장은 메모리(재시작하면 사라짐).
+그 밖의 번호는 정상 입금.
+
+장부(store.py, sqlite3): `SIM_DB_PATH`가 있으면 그 파일, 없으면 메모리(재시작하면 사라짐).
+  시작할 때 SIM_CUSTOMERS의 계좌를 잔액 1,000,000원으로 넣는다 (이미 있으면 건드리지 않음 = 재시작해도 잔액 유지).
+  잔액 규칙: 받는 계좌가 고객 계좌면 입금과 같은 트랜잭션에서 잔액 증가 + 거래내역 IN.
+            고객 계좌가 아니면(끝자리 시나리오·외부 은행 시험 송금) 거래내역만 남고 잔액은 없다.
+            0006은 잔액도 기록도 없다. 같은 transfer_id는 한 번만 입금한다 (멱등).
 
 본인 계좌 조회(SPEC 9.4): 김철수 / 19850315 / 010-9876-5432 → 계좌 2개, 홍길동 / 19900101 / 010-0000-0000 → 1개
 (AvengersBank 시연 고객 demo와 같은 사람). 시험 고객의 계좌는 수취 조회·입금 응답에 그 고객 이름이 나온다.
@@ -13,6 +19,7 @@
                       /interbank/* 2xx·4xx 응답에 응답 서명(SPEC 2.5)을 붙인다. 공개키는 허브에 902로 등록한다
   SIM_HUB_PUBLIC_KEY  허브 공개키(GET /v1/hub-key). 허브 요청의 서명을 검증한다. 비어 있으면 검증을 건너뛴다 (로컬 시험용)
   SIM_DELAY_SECONDS   지연(기본 8), SIM_CI_KEY 가상 CI 키(기본 example-ci-key-change-me)
+  SIM_DB_PATH         장부 SQLite 파일 경로 (예: /data/simbank.db). 비어 있으면 메모리
 실행: SIM_SIGNING_KEY=<개인키> uv run uvicorn bank_sim.main:app --port 8100
 """
 
@@ -20,7 +27,6 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, Request
@@ -31,6 +37,8 @@ from clearing_hub.core.ci import virtual_ci
 from clearing_hub.core.log_setup import configure_logging
 from clearing_hub.core.response_signing import ResponseSigningMiddleware
 from clearing_hub.core.signing import ALG_ED25519, public_key_of, verify_ed25519
+
+from .store import ReceivedView, open_ledger
 
 HOLDER_NAME = "김철수"
 
@@ -43,7 +51,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="BankSim (가짜 은행)", lifespan=lifespan)
-received: dict[str, dict] = {}  # transfer_id → 입금 기록 (멱등성)
+ledger = open_ledger(os.environ)  # SIM_DB_PATH 또는 메모리. 고객 계좌 시드는 SIM_CUSTOMERS 정의 뒤 (아래)
+received = ReceivedView(ledger)  # transfer_id → 입금 기록의 읽기 겉면 (멱등성). .clear()는 장부를 처음 상태로 (테스트용)
 server_errors_left: dict[str, int] = {}  # 0004: transfer_id → 남은 500 횟수
 seen_request_ids: list[tuple[str, str | None]] = []  # (경로, 받은 X-Request-ID). 최근 것만 둔다
 logger = logging.getLogger("bank_sim")
@@ -132,8 +141,8 @@ async def inquiry(data: InquiryRequest):
 @app.post("/interbank/receive", dependencies=[Depends(verify_hub)])
 async def receive(data: ReceiveRequest):
     tid = data.transfer_id
-    if tid in received:  # 멱등: 같은 ID는 입금하지 않고 같은 응답
-        return {"transfer_id": tid, "status": "COMPLETED", "holder_name": holder_of(received[tid]["to_account"])}
+    if (record := ledger.received(tid)) is not None:  # 멱등: 같은 ID는 입금하지 않고 같은 응답
+        return {"transfer_id": tid, "status": "COMPLETED", "holder_name": holder_of(record["to_account"])}
     match _behavior(data.to_account):
         case "0002":
             return _error(404, "ACCOUNT_NOT_FOUND", "받는 계좌를 찾을 수 없습니다", tid)
@@ -144,10 +153,13 @@ async def receive(data: ReceiveRequest):
             if left > 0:
                 server_errors_left[tid] = left - 1
                 return _error(500, "INTERNAL_ERROR", "일시 장애", tid)
-        case "0006":  # 입금도 기록도 하지 않고 완료라고 답한다. 허브는 COMPLETED로 기록하지만 이 은행 장부(received)에는 없다
+        case "0006":  # 입금도 기록도 하지 않고 완료라고 답한다. 허브는 COMPLETED로 기록하지만 이 은행 장부에는 없다
             logger.warning("0006: 입금하지 않고 COMPLETED로 답함 (대사 시연용)", extra={"transfer_id": tid})
             return {"transfer_id": tid, "status": "COMPLETED", "holder_name": holder_of(data.to_account)}
-    received[tid] = {**data.model_dump(), "received_at": datetime.now(UTC).isoformat(timespec="seconds")}
+    # 고객 계좌면 잔액 증가 + IN, 아니면 IN만. 지연(0003) 중 같은 ID가 먼저 들어왔으면 유일 제약으로 다시 넣지 않는다
+    ledger.receive(transfer_id=tid, to_account=data.to_account, amount=data.amount, from_bank=data.from_bank,
+                   from_bank_name=data.from_bank_name, from_account=data.from_account,
+                   sender_name=data.sender_name, memo=data.memo)
     if _behavior(data.to_account) == "0005":  # 입금은 됐는데 응답이 늦음 → 허브는 결과 조회로만 알 수 있다
         await _delay()
     return {"transfer_id": tid, "status": "COMPLETED", "holder_name": holder_of(data.to_account)}
@@ -155,7 +167,7 @@ async def receive(data: ReceiveRequest):
 
 @app.get("/interbank/receive/{transfer_id}", dependencies=[Depends(verify_hub)])
 async def receive_status(transfer_id: str):
-    record = received.get(transfer_id)
+    record = ledger.received(transfer_id)
     if record is None:
         return _error(404, "TRANSFER_NOT_FOUND", "그 거래 ID로 입금한 적이 없습니다", transfer_id)
     return {"transfer_id": transfer_id, "status": "COMPLETED", "holder_name": holder_of(record["to_account"]), "received_at": record["received_at"]}
@@ -174,6 +186,10 @@ SIM_CUSTOMERS = [
     {"name": "홍길동", "birth": "19900101", "phone": "010-0000-0000",
      "accounts": [{"account_num": "110-789-0001", "product_name": "자유입출금"}]},
 ]
+
+
+ledger.seed_accounts([{"account_num": a["account_num"], "holder": c["name"], "product_name": a["product_name"]}
+                      for c in SIM_CUSTOMERS for a in c["accounts"]])
 
 
 def holder_of(account_num: str) -> str:
@@ -195,4 +211,4 @@ async def accounts(data: AccountsRequest):
 
 @app.get("/")
 async def root():
-    return {"service": "BankSim", "received": len(received)}
+    return {"service": "BankSim", "received": ledger.received_count()}
